@@ -1,0 +1,28 @@
+services:
+  working:
+    build: ./working
+    volumes:
+      - ./storage:/storage
+    command: ["tail", "-f", "/dev/null"]
+
+  mysql:
+    build: ./mysql
+    volumes:
+      - ./sql:/root/sql
+      - db_data:/var/lib/mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: 'p@ssword'
+
+  php:
+    build: ./php
+    volumes:
+      - ./htdocs:/var/www/html
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - mysql
+
+volumes:
+    db_data: {}

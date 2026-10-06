@@ -1,0 +1,313 @@
+
+insert into test_table (id, name, example_number, example_message) values (3, 'test3', 30, 'message3');
+insert into test_table (id, name, example_number, example_message) values (1, 'new test1', 11, 'message1');
+insert into classes (class_id, class_name) values (2, 'designer course');
+
+// -------------- 起動 --------------
+docker-compose up -d
+docker-compose up -d --build
+
+
+// -------------- 10/06 --------------
+
+初めて起動する際はdokcer-compose buildのほうがいい
+
+RUN apt-get update && apt-get install -y \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+
+RUN apt-get update 最新版の情報
+apt-get install インストールする
+-y インストールの許可　自動化する際に必須
+vim サービス名
+rm remove 削除
+-rf /var/lib/apt/lists/*
+
+コンテナに入る
+docker-compose exec php bash
+
+--------
+tail -f /var/log/apache2/php_error.log
+末尾　待機状態　ファイルの場所
+
+cat
+全部出す
+何万行とある際に不安定
+
+vim
+矢印でページごとに読み込みしていくので安全
+--------
+
+
+
+
+// -------------- 9/08 --------------
+docker-compose up -d --build
+docker-compose exec redis bash
+redis-cli
+
+http://localhost/check_redis.phpを開く
+check_redis.php内でRedisに接続、保存を行ているため
+下記の文たちは一度phpをサイトで開かないと読み込むことができない
+
+HGETALL student:1
+
+HGET student:1 student_name
+
+DEL student:1
+
+************************************************************************
+
+Apachが受け取る　そしてPHPが動く
+PHPからデータサーバーにアクセス
+そのデータサーバーから持ってくるときに重いから
+一旦メモキャッシュサーバーに置いておいてそこからとることで軽くする
+
+************************************************************************
+
+// -------------- 新しいぷろじぇ --------------
+
+docker-compose build --no-cache
+docker-compose up -d
+
+Dockerfile.websocket-serverの編集
+# CMD ["php", "server.php"]
+# composer installがうまくいかない場合、下記でコンテナ作成→手動インストールする
+CMD ["tail", "-f", "/dev/null"]
+
+docker-compose build --no-cache
+docker-compose up -d
+docker-compose exec websocket-server bash
+composer install --no-interaction --prefer-dist --optimize-autoloader
+
+元に戻す
+CMD ["php", "server.php"]
+# composer installがうまくいかない場合、下記でコンテナ作成→手動インストールする
+# CMD ["tail", "-f", "/dev/null"]
+
+exit
+
+docker-compose build --no-cache
+docker-compose up -d
+
+docker開いて80:80開いてね
+
+
+// -------------- 9/01 --------------
+docker-compose up -d --build
+localhost/get_students.php
+docker-compose exec php-apache bash
+mysql -hmysql -uroot -p
+password
+DROP USER IF EXISTS 'data_user'@'localhost';
+CREATE USER 'data_user'@'%' IDENTIFIED BY 'data';
+GRANT ALL PRIVILEGES ON test_db.* TO 'data_user'@'%';
+FLUSH PRIVILEGES;
+GRANT ALL PRIVILEGES ON data_master.* TO 'data_user'@'%';
+FLUSH PRIVILEGES;
+
+
+// -------------- 8/25 --------------
+docker-compose up -d
+docker-compose up -d エラーなので再度
+TeraTerm起動
+host:localhost
+port:2222
+user:user
+password:password
+ログイン完了
+WinSCP起動
+host:localhost
+port:2222
+user:user
+password:password
+TeraTerm側
+pwd
+touch TestFile.txt
+ls -left
+TestFile.txtを作成後にWindows側にダウンロード
+
+キーペアを作成
+mkdir make_key
+cd make_key/
+ls -la
+ssn-keygen -t rsa -b 4096 -N "" -f test_rsa
+ls -la
+
+vscode
+cd .\docker\.ssh
+ssh -i test_rsa root@localhost -p 10022 失敗だよん
+
+TeraTermで接続を変える
+localhost:localhost
+port:10022
+user:root
+認証方式
+PSA/DSA/ECDSA/ED25519鍵を使う
+docker/.ssh/test_rsa
+
+WinSCP起動
+host:localhost
+port:10022
+user:root
+設定を開く
+SSHの認証を開く
+エージェントの転送を許可するをON
+下記の二つを設定
+C:\Users\koyo\Desktop\DB-GENPAKU7021\DB-GENPAKU\Projects\docker-lamp\docker\.ssh\test_rsa.ppk
+C:\Users\koyo\Desktop\DB-GENPAKU7021\DB-GENPAKU\Projects\docker-lamp\docker\.ssh\test_rsa.pub
+
+phpコンテナからsshを使用して接続確認
+docker-compose exec php-apache bash
+cd /root/.ssh/
+ssh -i test_rsa root@storage -p 22
+yes
+ここで鍵がエラー　test_rsaの鍵が誰でも書き換えれる状態なので変更する。
+0777って書いてるよ
+
+chmod 600 test_rsa
+↑鍵の権限を変更
+ssh -i test_rsa root@storage -p 22
+接続かんりょ
+できない場合は009p39
+
+実践課題WinSCPの活用
+
+cd /root/.ssh/
+scp -i test_rsa /var/log/apache2/php_*.log storage:/root/
+scp -i test_rsa /var/log/apache2/php_*.log root@storage:/root/
+copy 鍵の指定 ログファイル一式を storage:/root/にコピーしてくる
+
+// 010
+localhost/get_students.php
+
+mysql -hmysql -uroot -p
+password
+DROP USER IF EXISTS 'data_user'@'localhost';
+CREATE USER 'data_user'@'%' IDENTIFIED BY 'data';
+GRANT ALL PRIVILEGES ON test_db.* TO 'data_user'@'%';
+FLUSH PRIVILEGES;
+GRANT ALL PRIVILEGES ON data_master.* TO 'data_user'@'%';
+FLUSH PRIVILEGES;
+
+docker-compose.ymlに下記を追加
+memcachedコンテナを追加していく
+  memcached:
+    image: memcached:latest
+    container_name: memcached_cache
+    ports:
+      - "11211:11211"
+
+// -------------- 7/21 --------------
+
+
+// -------------- 7/14 --------------
+docker stop $(docker ps -q)
+docker rm $(docker ps -q -a)
+docker rmi $(docker images -q)
+docker volume rm $(docker volume ls -qf dangling=true)
+
+
+
+docker-compose up -d
+docker-compose up -d --build
+// docker-compose exec mysql bash
+docker-compose exec php-apache bash
+mysql -hmysql -uroot -p
+password
+//CREATE USER 'data_user'@'localhost' IDENTIFIED BY 'data';
+//GRANT ALL PRIVILEGES ON * . * TO 'data_user'@'localhost';
+CREATE DATABASE IF NOT EXISTS test_db;
+use test_db;
+CREATE TABLE IF NOT EXISTS test_table(id INT PRIMARY KEY,name VARCHAR(255),example_number INT, example_message VARCHAR(255));
+INSERT INTO test_table (id, name, example_number, example_message) values (1, 'test1', 10, 'massage1');
+INSERT INTO test_table (id, name, example_number, example_message) values (2, 'test2', 20, 'massage2');
+INSERT INTO test_table (id, name, example_number, example_message) values (3, 'test3', 30, 'massage3');
+SELECT * FROM test_table;
+
+
+
+// 権限
+DROP USER IF EXISTS 'data_user'@'localhost';
+CREATE USER 'data_user'@'%' IDENTIFIED BY 'data';
+GRANT ALL PRIVILEGES ON test_db.* TO 'data_user'@'%';
+FLUSH PRIVILEGES;
+GRANT ALL PRIVILEGES ON data_master.* TO 'data_user'@'%';
+FLUSH PRIVILEGES;
+
+
+CREATE DATABASE IF NOT EXISTS data_master;
+
+// ----------------------------------
+
+
+// ユーザーデータの作成
+CREATE USER 'data_user'@'localhost' IDENTIFIED BY 'data';
+// 確認
+select user, host from mysql.user;
+// 作業者用のユーザーデータの権限変更
+GRANT ALL PRIVILEGES ON * . * TO 'data_user'@'localhost';
+GRANT ALL PRIVILEGES ON test_db.* TO 'data_user'@'%';
+exit
+mysql -udata_user -p
+data
+// 現在のスキーマ確認
+show databases;
+
+DROP DATABASE IF EXISTS kadai_db;
+CREATE DATABASE IF NOT EXISTS kadai_db;
+show databases;
+
+use kadai_db;
+show tables;
+
+DROP TABLE IF EXISTS classes;
+
+CREATE TABLE IF NOT EXISTS jobs(id INT PRIMARY KEY,name VARCHAR(255));
+
+CREATE TABLE IF NOT EXISTS users(id INT PRIMARY KEY,name VARCHAR(255), level INT, job_id INT);
+
+CREATE TABLE IF NOT EXISTS battle_log(id MEDIUMINT NOT NULL AUTO_INCREMENT PRIMARY KEY, user_id INT, result_win BOOLEAN, create_date DATE NOT NULL);
+
+// ----------------------------------------------------------------
+
+// 例題(基礎)
+select * from users where id = 5;
+
+select * from users ORDER BY level DESC LIMIT 3;
+
+select count(id) from battle_log where create_data = '2025-01-05';
+
+select b.id as user_id, b.name as user_name, c.id as job_id, c.name as job_name from battle_log a left outer join users b on a.user_id = b.id left outer join jobs c on b.job_id = c.id;
+
+// 例題(難しい)
+select user_id, count(*) as win_count from battle_log where result_win = true group by user_id;
+
+select users.job_id, count(*) as win_count from battle_log join users on battle_log.user_id = users.id where battle_log.result_win = true group by users.job_id;
+
+select level_map,count(id) from(select b.id,
+case
+when u.level between 0 and 9 then 1
+when u.level between 10 and 19 then 10
+when u.level between 20 and 29 then 20
+when u.level between 30 and 39 then 30
+when u.level between 40 and 49 then 40
+else 0
+end as level_map from battle_log b left outer join users u on b.user_id = u.id where result_win = true ) as tmp group by level_map;
+
+// 例題(さらに難しい)
+select level_map as WinCount,count(id) as Num from(
+select
+b.id,
+case
+when u.level between 0 and 9 then '0-9'
+when u.level between 10 and 19 then '10-19'
+when u.level between 20 and 29 then '20-29'
+when u.level between 30 and 39 then '30-39'
+when u.level between 40 and 49 then '40-49'
+else 0
+end as level_map
+from battle_log b
+left outer join users u on b.user_id = u.id where result_win = true
+) as tmp group by level_map;

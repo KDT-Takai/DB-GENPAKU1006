@@ -7,6 +7,100 @@ insert into classes (class_id, class_name) values (2, 'designer course');
 docker-compose up -d
 docker-compose up -d --build
 
+// -------------- 10/13 --------------
+mysqlのコンテナに入る
+docker-compose exec mysql bash
+パスワードの入力
+p@ssword
+
+データベースの確認
+show databases;
+
+もし同名のものがあったら困るのでDROPで一度削除をしておく
+DROP DATABASE IF EXISTS test_db;
+データベースの作成
+CREATE DATABASE IF NOT EXISTS test_db;
+
+テーブルの確認
+show tables;
+
+jobsのテーブル削除
+DROP TABLE IF EXISTS jobs;
+
+jobsのテーブル作成
+CREATE TABLE IF NOT EXISTS test_db.jobs(
+id INT NOT NULL PRIMARY KEY,
+name VARCHAR(50)
+);
+
+
+usersのテーブル削除
+DROP TABLE IF EXISTS users;
+
+usersのテーブル作成
+CREATE TABLE IF NOT EXISTS test_db.users(
+id INT NOT NULL PRIMARY KEY,
+name VARCHAR(50),
+level INT,
+job_id INT
+);
+
+
+battle_logのテーブル削除
+DROP TABLE IF EXISTS battle_log;
+
+battle_logのテーブル作成
+CREATE TABLE IF NOT EXISTS test_db.battle_log(
+id INT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+user_id INT,
+result_win BOOLEAN,
+create_date DATE
+);
+
+// ---- 例題 ----
+1.ユーザーテーブルのユーザーID5のレコードを取得
+select * from users where id = '5';
+
+2.ユーザーレベルのトップ3を表示
+select * from users order by level desc limit 3;
+
+3.create_dateが「2025-01-05」のバトルログidをcountし、日付の横に表示
+select create_date, count(id) from battle_log where create_date = '2025-01-05' group by create_date; 
+
+4.ユーザーID、ユーザー名、ジョブID、ジョブ名を取得する
+select u.id, u.name, u.job_id, j.name from users u left outer join jobs j on u.job_id = j.id order by u.id;
+
+// 例題
+1.ユーザーIDごとの勝利数を集計、ユーザーIDと勝利数を取得する
+select user_id, count(id) from battle_log where result_win = 'TRUE' group by user_id;
+
+2.ジョブごとの勝利数を集計、ジョブIDと勝利数を取得する
+select u.job_id, count(b.id) win_count from battle_log b left outer join users u on b.user_id = u.id where b.result_win = true group by u.job_id;
+
+3.日付ごとのバトル数と勝利数
+select b1.create_date, count(b1.id) as battle_count,
+(select count(b2.id) from battle_log b2 where b2.result_win = true and b2.create_date = b1.create_date) as win_count
+from battle_log b1
+group by b1.create_date;
+
+// さらにムズイ
+select level_map,count(id) from(
+select
+b.id,
+case
+when u.level between 0 and 9 then 1
+when u.level between 10 and 19 then 10
+when u.level between 20 and 29 then 20
+when u.level between 30 and 39 then 30
+when u.level between 40 and 49 then 40
+else 0
+end as level_map
+from battle_log b
+left outer join users u on b.user_id = u.id where result_win = true
+) as tmp
+group by level_map
+;
+
 
 // -------------- 10/06 --------------
 

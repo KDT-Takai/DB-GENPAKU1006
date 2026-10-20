@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="48%" r="50%">
+      <stop offset="0" stop-color="#c8b6ff" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#c8b6ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="helmet" cx="35%" cy="30%" r="75%">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".55"/>
+      <stop offset=".5" stop-color="#9fd4ff" stop-opacity=".15"/>
+      <stop offset="1" stop-color="#6aa8ff" stop-opacity=".35"/>
+    </radialGradient>
+    <linearGradient id="fur" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb35c"/>
+      <stop offset="1" stop-color="#e0782a"/>
+    </linearGradient>
+  </defs>
+  <circle cx="150" cy="200" r="150" fill="url(#glow)"/>
+  <ellipse cx="150" cy="352" rx="90" ry="12" fill="#000" opacity=".35"/>
+  <!-- 宇宙服 -->
+  <path d="M85 350 C85 290 110 268 150 268 C190 268 215 290 215 350 Z" fill="#eef1f8"/>
+  <rect x="128" y="295" width="44" height="28" rx="6" fill="#4d7fd1"/>
+  <circle cx="140" cy="309" r="5" fill="#ffd27a"/><circle cx="160" cy="309" r="5" fill="#ff8a8a"/>
+  <rect x="98" y="258" width="104" height="18" rx="9" fill="#c4cbe0"/>
+  <!-- 頭 -->
+  <path d="M100 150 L95 95 L135 128 Z M200 150 L205 95 L165 128 Z" fill="url(#fur)"/>
+  <path d="M104 140 L102 108 L125 128 Z M196 140 L198 108 L175 128 Z" fill="#ffc9c9"/>
+  <ellipse cx="150" cy="185" rx="62" ry="58" fill="url(#fur)"/>
+  <path d="M150 128 L142 150 L158 150 Z M118 140 L122 160 M182 140 L178 160" stroke="#c45f1c" stroke-width="5" fill="#c45f1c"/>
+  <ellipse cx="128" cy="185" rx="10" ry="13" fill="#1d2a4a"/>
+  <ellipse cx="172" cy="185" rx="10" ry="13" fill="#1d2a4a"/>
+  <circle cx="131" cy="180" r="4" fill="#fff"/><circle cx="175" cy="180" r="4" fill="#fff"/>
+  <path d="M146 203 L154 203 L150 209 Z" fill="#ff7a9a"/>
+  <path d="M150 209 Q143 218 136 213 M150 209 Q157 218 164 213" stroke="#5a2d12" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M100 200 L70 194 M100 208 L72 212 M200 200 L230 194 M200 208 L228 212" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- ヘルメット -->
+  <circle cx="150" cy="178" r="98" fill="url(#helmet)" stroke="#dfe8ff" stroke-width="5"/>
+  <path d="M85 130 Q100 95 135 86" stroke="#fff" stroke-width="8" fill="none" stroke-linecap="round" opacity=".7"/>
+  <!-- 星 -->
+  <path d="M258 70 l4 10 10 4 -10 4 -4 10 -4 -10 -10 -4 10 -4 Z" fill="#fff4cf"/>
+  <path d="M40 260 l3 7 7 3 -7 3 -3 7 -3 -7 -7 -3 7 -3 Z" fill="#fff4cf"/>
+  <circle cx="60" cy="80" r="3" fill="#fff"/><circle cx="255" cy="290" r="3" fill="#fff"/>
+  <!-- 惑星 -->
+  <circle cx="250" cy="150" r="16" fill="#ff9ac2"/>
+  <ellipse cx="250" cy="150" rx="28" ry="7" fill="none" stroke="#ffd6e6" stroke-width="3" transform="rotate(-20 250 150)"/>
+</svg>

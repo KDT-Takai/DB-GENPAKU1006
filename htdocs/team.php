@@ -53,7 +53,7 @@ if ($editSlot < 1 || $editSlot > TEAM_SLOTS) {
 $candidates = [];
 if ($editSlot) {
     $stmt = db()->prepare(
-        'SELECT uc.id AS user_card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp, t.slot AS team_slot
+        'SELECT uc.id AS user_card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp, t.slot AS team_slot
            FROM user_cards uc
            JOIN cards c ON c.id = uc.card_id
            LEFT JOIN user_team_cards t ON t.user_card_id = uc.id

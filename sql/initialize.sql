@@ -22,6 +22,7 @@ CREATE TABLE cards (
     attack       INT         NOT NULL,
     hp           INT         NOT NULL,
     next_card_id INT         NULL,
+    image        VARCHAR(255) NOT NULL DEFAULT '',  -- htdocs/resource/cards/ 内の画像ファイル名
     FOREIGN KEY (next_card_id) REFERENCES cards (id)
 );
 
@@ -135,6 +136,18 @@ INSERT INTO cards (id, name, rarity, limit_break, attack, hp, next_card_id) VALU
 -- ★5
 (27, 'ドラゴン+2',         5, 2, 1280, 2560, NULL), (26, 'ドラゴン+1',         5, 1, 1040, 2080, 27), (25, 'ドラゴン',         5, 0,  800, 1600, 26),
 (30, '銀河の剣聖+2',       5, 2, 1520, 2240, NULL), (29, '銀河の剣聖+1',       5, 1, 1235, 1820, 30), (28, '銀河の剣聖',       5, 0,  950, 1400, 29);
+
+-- カード画像（同じシリーズは突破段階が違っても同じ画像）
+UPDATE cards SET image = 'slime.svg' WHERE name LIKE 'スライム%';
+UPDATE cards SET image = 'goblin.svg' WHERE name LIKE 'ゴブリン%';
+UPDATE cards SET image = 'knight.svg' WHERE name LIKE 'ナイト%';
+UPDATE cards SET image = 'mage.svg' WHERE name LIKE '見習い魔法使い%';
+UPDATE cards SET image = 'cat.svg' WHERE name LIKE '宇宙ネコ%';
+UPDATE cards SET image = 'archer.svg' WHERE name LIKE '流星の射手%';
+UPDATE cards SET image = 'ice.svg' WHERE name LIKE '氷晶の魔導士%';
+UPDATE cards SET image = 'guardian.svg' WHERE name LIKE '鉄壁の守護者%';
+UPDATE cards SET image = 'dragon.svg' WHERE name LIKE 'ドラゴン%';
+UPDATE cards SET image = 'swordsman.svg' WHERE name LIKE '銀河の剣聖%';
 
 INSERT INTO gachas (id, name, description, cost, pity) VALUES
 (1, '星海ワープ', '★5「ドラゴン」「銀河の剣聖」が登場！90回以内に★5が必ず1枚出現します。', 160, 90);

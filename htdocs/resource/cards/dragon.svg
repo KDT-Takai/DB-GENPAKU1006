@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="45%" r="55%">
+      <stop offset="0" stop-color="#ffcf7a" stop-opacity=".65"/>
+      <stop offset="1" stop-color="#ff7a2a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="scale" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff7a5a"/>
+      <stop offset=".5" stop-color="#c22b2b"/>
+      <stop offset="1" stop-color="#5a0f1f"/>
+    </linearGradient>
+    <linearGradient id="wing" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8f1d2c"/>
+      <stop offset="1" stop-color="#3a0a14"/>
+    </linearGradient>
+    <radialGradient id="fire" cx="30%" cy="50%" r="70%">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".3" stop-color="#ffe08a"/>
+      <stop offset=".7" stop-color="#ff8a2a"/>
+      <stop offset="1" stop-color="#ff3a2a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="150" cy="190" r="160" fill="url(#glow)"/>
+  <!-- 翼 -->
+  <path d="M120 200 L10 60 L40 140 L0 130 L50 200 L20 210 L100 250 Z" fill="url(#wing)"/>
+  <path d="M10 60 L120 200 M40 140 L110 215 M50 200 L105 235" stroke="#c9404f" stroke-width="3" opacity=".7"/>
+  <path d="M190 190 L290 50 L270 130 L300 125 L255 195 L285 205 L205 240 Z" fill="url(#wing)"/>
+  <path d="M290 50 L190 190 M270 130 L200 205 M255 195 L205 228" stroke="#c9404f" stroke-width="3" opacity=".7"/>
+  <!-- 首と体 -->
+  <path d="M110 360 C100 300 120 250 150 220 C180 250 200 300 190 360 Z" fill="url(#scale)"/>
+  <path d="M135 260 L165 260 M130 285 L170 285 M128 310 L172 310 M127 335 L173 335" stroke="#ffb38a" stroke-width="4" opacity=".55"/>
+  <!-- 頭 -->
+  <path d="M110 150 C110 110 130 90 150 90 C170 90 190 110 190 150 L200 200 C200 225 180 240 150 240 C120 240 100 225 100 200 Z" fill="url(#scale)"/>
+  <path d="M120 100 L95 40 L135 92 Z M180 100 L205 40 L165 92 Z" fill="#f2e2c4"/>
+  <path d="M112 150 L140 162 L112 170 Z M188 150 L160 162 L188 170 Z" fill="#ffe14d"/>
+  <path d="M124 158 L130 160 L124 164 Z M176 158 L170 160 L176 164 Z" fill="#1a0a0a"/>
+  <ellipse cx="135" cy="215" rx="6" ry="4" fill="#3a0a14"/><ellipse cx="165" cy="215" rx="6" ry="4" fill="#3a0a14"/>
+  <path d="M118 228 L124 240 L130 230 M170 230 L176 240 L182 228" fill="#fff"/>
+  <!-- 火の粉 -->
+  <g fill="#ffd27a">
+    <circle cx="60" cy="300" r="4"/><circle cx="245" cy="290" r="5"/><circle cx="80" cy="340" r="3"/>
+    <circle cx="230" cy="340" r="3"/><circle cx="150" cy="40" r="3"/>
+  </g>
+</svg>

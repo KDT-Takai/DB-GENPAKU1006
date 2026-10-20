@@ -10,8 +10,8 @@ $targetId = filter_input(INPUT_GET, 'target_id', FILTER_VALIDATE_INT);
 $target = false;
 if ($targetId) {
     $stmt = db()->prepare(
-        'SELECT uc.id AS user_card_id, uc.card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp,
-                c.next_card_id, nc.name AS next_name, nc.rarity AS next_rarity,
+        'SELECT uc.id AS user_card_id, uc.card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp,
+                c.next_card_id, nc.name AS next_name, nc.image AS next_image, nc.rarity AS next_rarity,
                 nc.limit_break AS next_limit_break, nc.attack AS next_attack, nc.hp AS next_hp
            FROM user_cards uc
            JOIN cards c ON c.id = uc.card_id
@@ -31,7 +31,7 @@ if (!$target || $target['next_card_id'] === null) {
 }
 
 $stmt = db()->prepare(
-    'SELECT uc.id AS user_card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp,
+    'SELECT uc.id AS user_card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp,
             (t.user_card_id IS NOT NULL) AS in_team
        FROM user_cards uc
        JOIN cards c ON c.id = uc.card_id
@@ -50,6 +50,7 @@ $materials = $stmt->fetchAll();
 
 $next = [
     'name'        => $target['next_name'],
+    'image'       => $target['next_image'],
     'rarity'      => $target['next_rarity'],
     'limit_break' => $target['next_limit_break'],
     'attack'      => $target['next_attack'],

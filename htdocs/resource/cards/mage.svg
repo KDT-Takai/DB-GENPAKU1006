@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="45%" r="50%">
+      <stop offset="0" stop-color="#ffd6a0" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#ffd6a0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="hat" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6b5bd6"/>
+      <stop offset="1" stop-color="#2a2170"/>
+    </linearGradient>
+    <linearGradient id="robe" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4b3fb0"/>
+      <stop offset="1" stop-color="#1c1650"/>
+    </linearGradient>
+    <radialGradient id="orb" cx="40%" cy="35%" r="60%">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".4" stop-color="#ffe08a"/>
+      <stop offset="1" stop-color="#ff9a3c"/>
+    </radialGradient>
+  </defs>
+  <circle cx="150" cy="190" r="150" fill="url(#glow)"/>
+  <ellipse cx="150" cy="352" rx="95" ry="12" fill="#000" opacity=".35"/>
+  <!-- ローブ -->
+  <path d="M80 350 L110 230 L190 230 L220 350 Z" fill="url(#robe)"/>
+  <path d="M150 230 L150 350" stroke="#e8c98f" stroke-width="4"/>
+  <!-- 顔 -->
+  <circle cx="150" cy="200" r="42" fill="#ffd9b8"/>
+  <circle cx="135" cy="203" r="5" fill="#2b2140"/>
+  <circle cx="165" cy="203" r="5" fill="#2b2140"/>
+  <path d="M140 222 Q150 229 160 222" stroke="#2b2140" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <!-- 帽子 -->
+  <path d="M70 178 Q150 150 230 178 Q150 196 70 178 Z" fill="#2a2170"/>
+  <path d="M100 172 L162 40 C170 30 190 48 180 60 L200 172 Z" fill="url(#hat)"/>
+  <path d="M106 160 Q150 150 196 160" stroke="#e8c98f" stroke-width="6" fill="none"/>
+  <path d="M150 95 l6 13 14 2 -10 10 2 14 -12 -7 -12 7 2 -14 -10 -10 14 -2 Z" fill="#ffe08a"/>
+  <!-- 杖 -->
+  <rect x="236" y="150" width="8" height="190" rx="4" fill="#7a4e2a" transform="rotate(8 240 245)"/>
+  <circle cx="226" cy="138" r="22" fill="url(#orb)"/>
+  <circle cx="226" cy="138" r="34" fill="#ffd27a" opacity=".25"/>
+  <path d="M262 100 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3 Z M196 96 l2 5 5 2 -5 2 -2 5 -2 -5 -5 -2 5 -2 Z" fill="#fff4cf"/>
+</svg>

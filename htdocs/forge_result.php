@@ -27,7 +27,7 @@ try {
 
     // 対象と素材をロックして取得（同時実行での二重消費を防ぐ）
     $stmt = $pdo->prepare(
-        'SELECT uc.id AS user_card_id, uc.card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp,
+        'SELECT uc.id AS user_card_id, uc.card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp,
                 c.next_card_id, (t.user_card_id IS NOT NULL) AS in_team
            FROM user_cards uc
            JOIN cards c ON c.id = uc.card_id
@@ -61,7 +61,7 @@ try {
     $pdo->commit();
 
     $stmt = $pdo->prepare(
-        'SELECT uc.id AS user_card_id, uc.card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp
+        'SELECT uc.id AS user_card_id, uc.card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp
            FROM user_cards uc
            JOIN cards c ON c.id = uc.card_id
           WHERE uc.id = :id'

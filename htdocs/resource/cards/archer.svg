@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="45%" r="50%">
+      <stop offset="0" stop-color="#e3b8ff" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#e3b8ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="trail" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset=".6" stop-color="#ffd6ff" stop-opacity=".7"/>
+      <stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+    <linearGradient id="bow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe7a8"/>
+      <stop offset=".5" stop-color="#c9933a"/>
+      <stop offset="1" stop-color="#ffe7a8"/>
+    </linearGradient>
+    <radialGradient id="meteor" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".5" stop-color="#ffb8f5"/>
+      <stop offset="1" stop-color="#a26bff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="150" cy="190" r="150" fill="url(#glow)"/>
+  <!-- 流星 -->
+  <path d="M290 20 L170 150 L182 160 Z" fill="url(#trail)"/>
+  <path d="M260 0 L200 80 L206 84 Z M300 70 L230 140 L236 146 Z" fill="url(#trail)" opacity=".6"/>
+  <circle cx="176" cy="154" r="22" fill="url(#meteor)"/>
+  <!-- 弓 -->
+  <path d="M90 60 C30 140 30 260 90 340" stroke="url(#bow)" stroke-width="12" fill="none" stroke-linecap="round"/>
+  <path d="M90 60 C38 140 38 260 90 340" stroke="#7a4e2a" stroke-width="3" fill="none" opacity=".5"/>
+  <path d="M90 60 L150 200 L90 340" stroke="#f3eaff" stroke-width="2.5" fill="none"/>
+  <circle cx="90" cy="60" r="8" fill="#e8c98f"/><circle cx="90" cy="340" r="8" fill="#e8c98f"/>
+  <!-- 矢 -->
+  <path d="M150 200 L268 200" stroke="#f3eaff" stroke-width="5"/>
+  <path d="M268 188 L292 200 L268 212 Z" fill="#e8c98f"/>
+  <path d="M150 200 L132 186 L162 192 Z M150 200 L132 214 L162 208 Z" fill="#c084ff"/>
+  <circle cx="292" cy="200" r="10" fill="#fff" opacity=".7"/>
+  <!-- きらめき -->
+  <path d="M222 260 l4 10 10 4 -10 4 -4 10 -4 -10 -10 -4 10 -4 Z" fill="#fff4cf"/>
+  <path d="M60 110 l3 7 7 3 -7 3 -3 7 -3 -7 -7 -3 7 -3 Z" fill="#fff4cf"/>
+  <circle cx="240" cy="320" r="3" fill="#fff"/><circle cx="130" cy="90" r="2.5" fill="#fff"/>
+</svg>

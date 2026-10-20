@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="45%" r="50%">
+      <stop offset="0" stop-color="#bff4ff" stop-opacity=".6"/>
+      <stop offset="1" stop-color="#bff4ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ice" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".5" stop-color="#9fe6ff"/>
+      <stop offset="1" stop-color="#3a8fd9"/>
+    </linearGradient>
+    <linearGradient id="staff" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e6f6ff"/>
+      <stop offset="1" stop-color="#6c86a8"/>
+    </linearGradient>
+  </defs>
+  <circle cx="150" cy="180" r="150" fill="url(#glow)"/>
+  <ellipse cx="150" cy="355" rx="80" ry="10" fill="#000" opacity=".3"/>
+  <!-- 杖 -->
+  <rect x="145" y="150" width="10" height="205" rx="5" fill="url(#staff)"/>
+  <path d="M150 150 C120 140 118 110 132 96 M150 150 C180 140 182 110 168 96" stroke="#cfe9ff" stroke-width="5" fill="none"/>
+  <!-- 中央の大きな結晶 -->
+  <path d="M150 40 L182 110 L150 160 L118 110 Z" fill="url(#ice)" stroke="#fff" stroke-width="2"/>
+  <path d="M150 40 L150 160 M118 110 L182 110" stroke="#fff" stroke-width="1.5" opacity=".7"/>
+  <!-- 周囲の結晶 -->
+  <g fill="url(#ice)" stroke="#fff" stroke-width="1.5">
+    <path d="M60 150 L74 120 L88 150 L74 190 Z"/>
+    <path d="M226 160 L242 128 L258 160 L242 200 Z"/>
+    <path d="M86 250 L96 230 L106 250 L96 276 Z"/>
+    <path d="M200 250 L210 232 L220 250 L210 274 Z"/>
+  </g>
+  <!-- 雪の結晶 -->
+  <g stroke="#fff" stroke-width="3" stroke-linecap="round">
+    <path d="M60 70 L60 100 M47 77 L73 93 M47 93 L73 77"/>
+    <path d="M245 60 L245 84 M235 66 L255 78 M235 78 L255 66"/>
+    <path d="M150 220 L150 244 M140 226 L160 238 M140 238 L160 226" opacity=".8"/>
+  </g>
+  <circle cx="40" cy="220" r="3" fill="#fff"/><circle cx="270" cy="250" r="3" fill="#fff"/><circle cx="120" cy="40" r="2.5" fill="#fff"/>
+</svg>

@@ -17,7 +17,7 @@ if (!isset($orders[$sort])) {
 }
 
 // ORDER BY はプレースホルダにできないので、許可したものだけを埋め込む
-$sql = 'SELECT uc.id AS user_card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp,
+$sql = 'SELECT uc.id AS user_card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp,
                (t.user_card_id IS NOT NULL) AS in_team
           FROM user_cards uc
           JOIN cards c ON c.id = uc.card_id

@@ -93,7 +93,7 @@ function user_gems(int $userId): int
 function team_cards(int $userId): array
 {
     $stmt = db()->prepare(
-        'SELECT t.slot, uc.id AS user_card_id, uc.card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp
+        'SELECT t.slot, uc.id AS user_card_id, uc.card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp
            FROM user_team_cards t
            JOIN user_cards uc ON uc.id = t.user_card_id
            JOIN cards c ON c.id = uc.card_id
@@ -129,7 +129,7 @@ const TEAM_SLOTS = 4;
  */
 function render_card(array $c, array $opts = []): void
 {
-    $classes = ['card', 'r' . (int)$c['rarity']];
+    $classes = ['card', 'r' . (int)$c['rarity'], 'lb' . (int)$c['limit_break']];
     if (!empty($opts['disabled'])) $classes[] = 'disabled';
     if (!empty($opts['large']))    $classes[] = 'large';
     $clickable = empty($opts['disabled']) && (isset($opts['href']) || isset($opts['post']));
@@ -143,7 +143,14 @@ function render_card(array $c, array $opts = []): void
 
     ob_start(); ?>
   <div class="card-band"><span class="stars"><?= stars((int)$c['rarity']) ?></span><?php if (isset($c['user_card_id'])): ?><span class="uid">#<?= h($c['user_card_id']) ?></span><?php endif; ?></div>
+<?php if (!empty($c['image'])): ?>
+  <img class="card-art" src="resource/cards/<?= h($c['image']) ?>" alt="" loading="lazy">
+<?php else: ?>
   <span class="emblem"><?= h(mb_substr($c['name'], 0, 1)) ?></span>
+<?php endif; ?>
+<?php if (!empty($opts['badges'])): ?>
+  <div class="badges"><?php foreach ($opts['badges'] as [$text, $type]): ?><span class="badge badge-<?= h($type) ?>"><?= h($text) ?></span><?php endforeach; ?></div>
+<?php endif; ?>
   <div class="card-body">
     <div class="card-name"><?= h($c['name']) ?></div>
     <div class="lb">限界突破 <?= str_repeat('<i class="on"></i>', (int)$c['limit_break']) ?><?= str_repeat('<i></i>', max(0, 2 - (int)$c['limit_break'])) ?></div>
@@ -151,9 +158,6 @@ function render_card(array $c, array $opts = []): void
       <div><dt>ATK</dt><dd><?= h($c['attack']) ?><?= $diff('attack') ?></dd></div>
       <div><dt>HP</dt><dd><?= h($c['hp']) ?><?= $diff('hp') ?></dd></div>
     </dl>
-<?php if (!empty($opts['badges'])): ?>
-    <div class="badges"><?php foreach ($opts['badges'] as [$text, $type]): ?><span class="badge badge-<?= h($type) ?>"><?= h($text) ?></span><?php endforeach; ?></div>
-<?php endif; ?>
 <?php if (!empty($opts['note'])): ?>
     <div class="card-note"><?= h($opts['note']) ?></div>
 <?php endif; ?>
@@ -302,7 +306,7 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
   /* カードタイル（光円錐風） */
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 18px; }
   .card-form { margin: 0; display: contents; }
-  .card { --rc: var(--r1); --rd: var(--r1-d); position: relative; display: flex; flex-direction: column; width: 100%; min-height: 250px;
+  .card { --rc: var(--r1); --rd: var(--r1-d); position: relative; display: flex; flex-direction: column; width: 100%; min-height: 300px;
           text-align: left; font: inherit; color: var(--text); text-decoration: none; padding: 0; border: 0; overflow: hidden;
           background:
             radial-gradient(circle at 70% 35%, rgba(255,255,255,.18), transparent 45%),
@@ -335,14 +339,28 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
   .stats dd { margin: 0; font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 17px; font-variant-numeric: tabular-nums; }
   .stats .up { color: #8ff0b2; font-size: 13px; }
   .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .card .badges { position: absolute; top: 34px; left: 10px; right: 10px; margin: 0; z-index: 2; flex-direction: column; align-items: flex-start; }
   .badge { font-size: 11px; font-weight: 700; padding: 1px 9px; border-radius: 999px; background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.25); }
   .badge-team { color: #ffd88a; border-color: rgba(255,216,138,.6); }
   .badge-max { color: #cfe0ff; border-color: rgba(180,205,255,.6); }
   .badge-warn { color: #ffb3b3; border-color: rgba(255,140,140,.6); }
   .card-note { margin-top: 6px; font-size: 11px; color: rgba(255,255,255,.7); }
-  .card.large { min-height: 290px; }
+  .card.large { min-height: 340px; }
   .card.large .card-name { font-size: 21px; }
 
+  /* カードイラスト（限界突破するほど光る） */
+  .card-art { position: absolute; left: 0; right: 0; top: 22px; width: 100%; height: 60%; object-fit: contain; pointer-events: none;
+              transition: transform .25s; }
+  .card.clickable:hover .card-art { transform: scale(1.05); }
+  .card.lb1 .card-art { filter: drop-shadow(0 0 8px rgba(255,230,170,.55)); }
+  .card.lb2 .card-art { filter: drop-shadow(0 0 14px rgba(255,216,138,.9)) saturate(1.15); }
+  .card.lb2::before { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+                      background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,.18) 45%, transparent 60%); }
+  .banner-art { position: absolute; right: 10px; bottom: -10px; display: flex; pointer-events: none; }
+  .banner-art img { width: 190px; height: 250px; object-fit: contain; filter: drop-shadow(0 0 18px rgba(255,210,140,.5)); }
+  .banner-art img + img { margin-left: -60px; margin-top: -30px; }
+  .banner > *:not(.banner-art) { position: relative; z-index: 1; }
+  @media (max-width: 720px) { .banner-art { opacity: .35; } }
   /* 強化前→強化後 */
   .compare { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); gap: 20px; align-items: center; max-width: 520px; margin: 0 auto; }
   .compare .arrow { font-size: 0; width: 34px; height: 34px; position: relative; }
@@ -435,7 +453,7 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
 
   /* チーム編成 */
   .slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-  .slot-empty { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px; min-height: 250px;
+  .slot-empty { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px; min-height: 300px;
                 border: 1px dashed rgba(255,255,255,.25); color: var(--muted); text-decoration: none; font-size: 13px;
                 clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); transition: border-color .15s, color .15s; }
   .slot-empty::before { content: "+"; font-size: 34px; line-height: 1; font-weight: 300; }

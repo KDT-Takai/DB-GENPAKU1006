@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+  <defs>
+    <radialGradient id="galaxy" cx="50%" cy="45%" r="55%">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".9"/>
+      <stop offset=".15" stop-color="#ffe7a8" stop-opacity=".8"/>
+      <stop offset=".45" stop-color="#b48cff" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#3a5bd9" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#9fd4ff"/>
+      <stop offset=".5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#7b8cff"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff2c8"/>
+      <stop offset=".5" stop-color="#e2b467"/>
+      <stop offset="1" stop-color="#8a5f22"/>
+    </linearGradient>
+  </defs>
+  <!-- 銀河の渦 -->
+  <circle cx="150" cy="180" r="160" fill="url(#galaxy)"/>
+  <g fill="none" stroke-linecap="round" opacity=".75">
+    <path d="M150 180 C210 150 250 200 220 250 C190 300 100 290 80 230 C60 170 110 110 180 110" stroke="#cdb6ff" stroke-width="5"/>
+    <path d="M150 180 C90 210 50 160 80 110 C110 60 200 70 220 130 C240 190 190 250 120 250" stroke="#9fd4ff" stroke-width="4"/>
+  </g>
+  <!-- 星 -->
+  <g fill="#fff">
+    <circle cx="60" cy="60" r="2.5"/><circle cx="250" cy="80" r="3"/><circle cx="40" cy="300" r="2.5"/>
+    <circle cx="265" cy="320" r="2.5"/><circle cx="210" cy="40" r="2"/><circle cx="90" cy="350" r="2"/>
+  </g>
+  <path d="M245 230 l4 10 10 4 -10 4 -4 10 -4 -10 -10 -4 10 -4 Z" fill="#fff4cf"/>
+  <path d="M55 140 l3 7 7 3 -7 3 -3 7 -3 -7 -7 -3 7 -3 Z" fill="#fff4cf"/>
+  <!-- 剣 -->
+  <path d="M150 20 L166 60 L162 270 L138 270 L134 60 Z" fill="url(#blade)" stroke="#fff" stroke-width="1.5"/>
+  <path d="M150 30 L150 268" stroke="#e8f4ff" stroke-width="2" opacity=".8"/>
+  <path d="M96 268 C120 280 180 280 204 268 L210 284 C180 296 120 296 90 284 Z" fill="url(#gold)"/>
+  <circle cx="150" cy="280" r="10" fill="#7b8cff" stroke="#fff2c8" stroke-width="3"/>
+  <rect x="142" y="292" width="16" height="58" rx="4" fill="#2a1d5c"/>
+  <path d="M142 302 L158 312 M142 318 L158 328 M142 334 L158 344" stroke="#e2b467" stroke-width="3"/>
+  <circle cx="150" cy="360" r="11" fill="url(#gold)"/>
+  <!-- 剣の光 -->
+  <path d="M150 0 L150 60" stroke="#fff" stroke-width="3" opacity=".6"/>
+  <path d="M120 30 L180 30" stroke="#fff" stroke-width="2" opacity=".5"/>
+</svg>

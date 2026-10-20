@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#b6ff8a" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#b6ff8a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="skin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9fd86a"/>
+      <stop offset="1" stop-color="#3f7a2c"/>
+    </linearGradient>
+    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#8fa3b8"/>
+    </linearGradient>
+  </defs>
+  <circle cx="150" cy="200" r="150" fill="url(#glow)"/>
+  <ellipse cx="150" cy="345" rx="90" ry="12" fill="#000" opacity=".35"/>
+  <!-- 体 -->
+  <path d="M95 345 C95 285 115 262 150 262 C185 262 205 285 205 345 Z" fill="#6b4a2e"/>
+  <path d="M120 270 L150 300 L180 270" fill="none" stroke="#3d2a19" stroke-width="5"/>
+  <!-- 耳 -->
+  <path d="M95 170 L20 130 L80 205 Z" fill="url(#skin)"/>
+  <path d="M205 170 L280 130 L220 205 Z" fill="url(#skin)"/>
+  <path d="M90 175 L45 148 L82 196 Z" fill="#e58e8e" opacity=".6"/>
+  <path d="M210 175 L255 148 L218 196 Z" fill="#e58e8e" opacity=".6"/>
+  <!-- 頭 -->
+  <ellipse cx="150" cy="190" rx="68" ry="80" fill="url(#skin)"/>
+  <path d="M100 160 Q122 148 140 166" stroke="#2c4f1d" stroke-width="7" fill="none" stroke-linecap="round"/>
+  <path d="M200 160 Q178 148 160 166" stroke="#2c4f1d" stroke-width="7" fill="none" stroke-linecap="round"/>
+  <ellipse cx="122" cy="185" rx="13" ry="10" fill="#ffe14d"/>
+  <ellipse cx="178" cy="185" rx="13" ry="10" fill="#ffe14d"/>
+  <ellipse cx="124" cy="186" rx="4" ry="8" fill="#1a1a1a"/>
+  <ellipse cx="176" cy="186" rx="4" ry="8" fill="#1a1a1a"/>
+  <path d="M150 196 Q140 222 150 226 Q160 222 150 196" fill="#5d9a3e"/>
+  <path d="M118 238 Q150 258 182 238" stroke="#1f3a14" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <path d="M128 241 L133 252 L138 244 Z M162 244 L167 252 L172 241 Z" fill="#fffbe8"/>
+  <!-- 短剣 -->
+  <g transform="translate(22 18) rotate(-30 240 280)">
+    <rect x="234" y="270" width="12" height="38" rx="3" fill="#5a3a20"/>
+    <rect x="222" y="262" width="36" height="9" rx="3" fill="#c9a14a"/>
+    <path d="M240 262 L232 200 L240 175 L248 200 Z" fill="url(#blade)"/>
+  </g>
+</svg>

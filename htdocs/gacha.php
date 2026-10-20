@@ -11,7 +11,7 @@ $gacha = $stmt->fetch();
 
 // 排出対象カードと重み
 $stmt = db()->prepare(
-    'SELECT gi.card_id, gi.weight, c.name, c.rarity, c.limit_break, c.attack, c.hp
+    'SELECT gi.card_id, gi.weight, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp
        FROM gacha_items gi
        JOIN cards c ON c.id = gi.card_id
       WHERE gi.gacha_id = :id
@@ -105,7 +105,7 @@ if (!empty($_SESSION['gacha_result'])) {
     $ids = array_column($_SESSION['gacha_result'], 'user_card_id');
     $in  = implode(',', array_fill(0, count($ids), '?'));
     $stmt = db()->prepare(
-        "SELECT uc.id AS user_card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp
+        "SELECT uc.id AS user_card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp
            FROM user_cards uc JOIN cards c ON c.id = uc.card_id
           WHERE uc.id IN ($in)"
     );
@@ -150,6 +150,11 @@ render_flash();
 <?php endif; ?>
 
 <section class="banner">
+  <div class="banner-art">
+<?php foreach ($pickups as $p): ?>
+    <img src="resource/cards/<?= h($p['image']) ?>" alt="">
+<?php endforeach; ?>
+  </div>
   <span class="en">Event Warp</span>
   <h2><?= h($gacha['name']) ?></h2>
   <p><?= h($gacha['description']) ?></p>

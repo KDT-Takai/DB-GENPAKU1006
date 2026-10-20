@@ -10,6 +10,7 @@ SELECT
     uc.id                       AS user_card_id,
     uc.card_id,
     c.name,
+    c.image,
     c.rarity,
     c.limit_break,
     c.attack,

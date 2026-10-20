@@ -25,10 +25,12 @@ if ($message !== '') {
 ?>
 <div class="menu-grid" style="margin-bottom:28px">
   <a class="menu-item" href="forge_entrance.php">
+    <span class="en">Limit Break</span>
     <div class="t">カード強化（限界突破）</div>
     <div class="d">同じカードを2枚使って、上位のカードに強化します</div>
   </a>
   <a class="menu-item" href="select_user.php">
+    <span class="en">Switch User</span>
     <div class="t">ユーザー選択</div>
     <div class="d">操作するユーザーを切り替えます</div>
   </a>

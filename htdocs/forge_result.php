@@ -83,7 +83,7 @@ if ($error !== null) {
     render_header('強化結果', 3);
 ?>
 <div class="panel">
-  <p class="celebrate">限界突破に成功しました！</p>
+  <p class="celebrate"><span class="en">Limit Break Success</span><span class="ja">限界突破に成功しました</span></p>
   <div class="compare">
     <div>
       <div class="label">強化前</div>

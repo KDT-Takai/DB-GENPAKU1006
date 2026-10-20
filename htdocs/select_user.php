@@ -26,33 +26,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['select_user'])) {
     $message = 'ユーザーの選択に失敗しました。';
 }
 
-$users = db()->query('SELECT id, name FROM users ORDER BY id')->fetchAll();
+// ユーザーごとの所持カード枚数も表示する
+$users = db()->query(
+    'SELECT u.id, u.name, COUNT(uc.id) AS card_num
+       FROM users u
+       LEFT JOIN user_cards uc ON uc.user_id = u.id
+      GROUP BY u.id, u.name
+      ORDER BY u.id'
+)->fetchAll();
 
-render_header('ユーザー選択');
+$me = current_user();
+render_header('ユーザー選択', 0, '操作するユーザーを選んでください。');
+
+if ($message !== '') {
+    render_notice($message);
+}
 ?>
-<?php if ($message !== ''): ?>
-<p class="message"><?= h($message) ?></p>
-<?php endif; ?>
-<div class="box">
 <?php if (!$users): ?>
-  <p>ユーザーが登録されていません。<a href="menu.php">メニュー</a>から作成してください。</p>
+<?php render_notice('ユーザーが登録されていません。メニューから作成してください。'); ?>
 <?php else: ?>
-  <table>
-    <tr><th class="num">ユーザーID</th><th>ユーザー名</th><th>操作</th></tr>
+<div class="user-list">
 <?php foreach ($users as $u): ?>
-    <tr>
-      <td class="num"><?= h($u['id']) ?></td>
-      <td><?= h($u['name']) ?></td>
-      <td>
-        <form action="select_user.php" method="post">
-          <input type="hidden" name="user_id" value="<?= h($u['id']) ?>">
-          <button type="submit" name="select_user">このユーザーを使用する</button>
-        </form>
-      </td>
-    </tr>
-<?php endforeach; ?>
-  </table>
+  <div class="user-item<?= $me && $me['id'] === (int)$u['id'] ? ' me' : '' ?>">
+    <div class="avatar"><?= h(mb_substr($u['name'], 0, 1)) ?></div>
+    <div class="info">
+      <div class="name"><?= h($u['name']) ?></div>
+      <div class="muted">ID: <?= h($u['id']) ?> ・ カード <?= h($u['card_num']) ?>枚</div>
+    </div>
+<?php if ($me && $me['id'] === (int)$u['id']): ?>
+    <span class="badge badge-max">選択中</span>
+<?php else: ?>
+    <form action="select_user.php" method="post">
+      <input type="hidden" name="user_id" value="<?= h($u['id']) ?>">
+      <button type="submit" name="select_user" class="btn">選択</button>
+    </form>
 <?php endif; ?>
+  </div>
+<?php endforeach; ?>
 </div>
-<p><a href="menu.php">メニューに戻る</a></p>
+<?php endif; ?>
+<p style="margin-top:24px"><a class="btn btn-ghost" href="menu.php">メニューに戻る</a></p>
 <?php render_footer(); ?>

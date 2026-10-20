@@ -75,30 +75,32 @@ try {
     $error = $e->getMessage();
 }
 
-render_header('強化結果', 3);
 
-if ($error !== null): ?>
-<p class="error"><?= h($error) ?></p>
-<?php else: ?>
-<div class="box">
-  <p><strong>限界突破に成功しました！</strong>（素材の所持ID <?= h($materialId) ?> は消費されました）</p>
-  <table>
-    <tr><th></th><th class="num">所持ID</th><th class="num">カードID</th><th>カード名</th><th>レア</th><th class="num">突破</th><th class="num">攻撃</th><th class="num">HP</th></tr>
-<?php foreach (['強化前' => $before, '強化後' => $after] as $label => $c): ?>
-    <tr>
-      <th><?= h($label) ?></th>
-      <td class="num"><?= h($c['user_card_id']) ?></td>
-      <td class="num"><strong><?= h($c['card_id']) ?></strong></td>
-      <td><?= h($c['name']) ?></td>
-      <td class="rarity"><?= stars((int)$c['rarity']) ?></td>
-      <td class="num"><?= h($c['limit_break']) ?></td>
-      <td class="num"><?= h($c['attack']) ?></td>
-      <td class="num"><?= h($c['hp']) ?></td>
-    </tr>
-<?php endforeach; ?>
-  </table>
-  <p>カードID：<strong><?= h($before['card_id']) ?></strong> → <strong><?= h($after['card_id']) ?></strong></p>
+if ($error !== null) {
+    render_header('強化できませんでした', 3);
+    render_notice($error, 'error');
+} else {
+    render_header('強化結果', 3);
+?>
+<div class="panel">
+  <p class="celebrate">限界突破に成功しました！</p>
+  <div class="compare">
+    <div>
+      <div class="label">強化前</div>
+      <?php render_card($before, ['large' => true]); ?>
+    </div>
+    <div class="arrow">→</div>
+    <div>
+      <div class="label">強化後</div>
+      <?php render_card($after, ['large' => true, 'diff' => $before]); ?>
+    </div>
+  </div>
+  <p class="idchange">カードID <strong><?= h($before['card_id']) ?></strong> → <strong><?= h($after['card_id']) ?></strong></p>
+  <p class="muted" style="text-align:center">素材にしたカード（#<?= h($materialId) ?>）はなくなりました。</p>
 </div>
-<?php endif; ?>
-<p><a href="forge_entrance.php">強化対象選択へ戻る</a></p>
+<?php } ?>
+<div class="actions">
+  <a class="btn" href="forge_entrance.php">続けて強化する</a>
+  <a class="btn btn-ghost" href="menu.php">メニューに戻る</a>
+</div>
 <?php render_footer(); ?>

@@ -11,7 +11,8 @@ $target = false;
 if ($targetId) {
     $stmt = db()->prepare(
         'SELECT uc.id AS user_card_id, uc.card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp,
-                c.next_card_id, nc.name AS next_name
+                c.next_card_id, nc.name AS next_name, nc.rarity AS next_rarity,
+                nc.limit_break AS next_limit_break, nc.attack AS next_attack, nc.hp AS next_hp
            FROM user_cards uc
            JOIN cards c ON c.id = uc.card_id
            LEFT JOIN cards nc ON nc.id = c.next_card_id
@@ -21,17 +22,10 @@ if ($targetId) {
     $target = $stmt->fetch();
 }
 
-render_header('素材カードを選択', 2);
-
-if (!$target) {
-    echo '<p class="error">強化対象のカードが見つかりません。</p>';
-    echo '<p><a href="forge_entrance.php">強化対象選択へ戻る</a></p>';
-    render_footer();
-    exit;
-}
-if ($target['next_card_id'] === null) {
-    echo '<p class="error">' . h($target['name']) . ' は最大まで突破済みです。</p>';
-    echo '<p><a href="forge_entrance.php">強化対象選択へ戻る</a></p>';
+if (!$target || $target['next_card_id'] === null) {
+    render_header('素材を選ぶ', 2);
+    render_notice($target ? $target['name'] . ' は最大まで突破済みです。' : '強化するカードが見つかりません。', 'error');
+    echo '<p><a class="btn btn-ghost" href="forge_entrance.php">強化するカードを選び直す</a></p>';
     render_footer();
     exit;
 }
@@ -53,47 +47,46 @@ $stmt->execute([
     ':target_id' => $target['user_card_id'],
 ]);
 $materials = $stmt->fetchAll();
+
+$next = [
+    'name'        => $target['next_name'],
+    'rarity'      => $target['next_rarity'],
+    'limit_break' => $target['next_limit_break'],
+    'attack'      => $target['next_attack'],
+    'hp'          => $target['next_hp'],
+];
+
+render_header('素材を選ぶ', 2, '素材にするカードをクリックすると、すぐに強化が実行されます。素材にしたカードはなくなります。');
 ?>
-<div class="box">
-  <strong>強化対象：</strong>
-  所持ID <?= h($target['user_card_id']) ?> / <?= h($target['name']) ?>
-  <span class="rarity"><?= stars((int)$target['rarity']) ?></span>
-  → <strong><?= h($target['next_name']) ?></strong>
+<div class="panel">
+  <div class="compare">
+    <div>
+      <div class="label">強化するカード</div>
+      <?php render_card($target, ['large' => true]); ?>
+    </div>
+    <div class="arrow">→</div>
+    <div>
+      <div class="label">強化後</div>
+      <?php render_card($next, ['large' => true, 'diff' => $target]); ?>
+    </div>
+  </div>
 </div>
 
-<div class="box">
+<h2>素材にするカード</h2>
 <?php if (!$materials): ?>
-  <p>素材にできるカードがありません。</p>
+<?php render_notice('素材にできるカードがありません。'); ?>
 <?php else: ?>
-  <table>
-    <tr>
-      <th class="num">所持ID</th><th>カード名</th><th>レア</th><th class="num">突破</th>
-      <th class="num">攻撃</th><th class="num">HP</th><th>状態</th>
-    </tr>
-<?php foreach ($materials as $m): ?>
-    <tr>
-      <td class="num"><?= h($m['user_card_id']) ?></td>
-      <td>
-<?php if ($m['in_team']): ?>
-        <?= h($m['name']) ?>
-<?php else: ?>
-        <form method="post" action="forge_result.php" style="margin:0">
-          <input type="hidden" name="target_id" value="<?= h($target['user_card_id']) ?>">
-          <input type="hidden" name="material_id" value="<?= h($m['user_card_id']) ?>">
-          <button type="submit" class="link"><?= h($m['name']) ?></button>
-        </form>
-<?php endif; ?>
-      </td>
-      <td class="rarity"><?= stars((int)$m['rarity']) ?></td>
-      <td class="num"><?= h($m['limit_break']) ?></td>
-      <td class="num"><?= h($m['attack']) ?></td>
-      <td class="num"><?= h($m['hp']) ?></td>
-      <td><?php if ($m['in_team']): ?><span class="tag">編成中のため素材にできません</span><?php endif; ?></td>
-    </tr>
-<?php endforeach; ?>
-  </table>
-<?php endif; ?>
+<div class="grid">
+<?php foreach ($materials as $m):
+    render_card($m, [
+        'post'        => ['target_id' => $target['user_card_id'], 'material_id' => $m['user_card_id']],
+        'post_action' => 'forge_result.php',
+        'disabled'    => (bool)$m['in_team'],
+        'badges'      => $m['in_team'] ? [['編成中', 'team']] : [],
+        'note'        => $m['in_team'] ? '編成中のため素材にできません' : 'クリックで素材にする',
+    ]);
+endforeach; ?>
 </div>
-<p class="muted">素材にしたカードは消費されます。</p>
-<p><a href="forge_entrance.php">強化対象選択へ戻る</a></p>
+<?php endif; ?>
+<p style="margin-top:24px"><a class="btn btn-ghost" href="forge_entrance.php">強化するカードを選び直す</a></p>
 <?php render_footer(); ?>

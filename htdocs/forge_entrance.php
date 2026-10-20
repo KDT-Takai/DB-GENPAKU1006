@@ -45,51 +45,54 @@ $stmt = db()->prepare($sql);
 $stmt->execute([':user_id_sub' => $user['id'], ':user_id' => $user['id']]);
 $rows = $stmt->fetchAll();
 
-render_header('強化対象カードを選択', 1);
+
+// 同じカードごとにまとめる
+$groups = [];
+foreach ($rows as $r) {
+    $groups[$r['card_id']][] = $r;
+}
+
+render_header('強化するカードを選ぶ', 1, '同じカードを2枚以上持っていると限界突破できます。強化したいカードをクリックしてください。');
+
+if (!$groups) {
+    render_notice('同じカードを2枚以上持っていないため、限界突破できるカードがありません。');
+}
+
+foreach ($groups as $cards):
+    $first = $cards[0];
 ?>
-<div class="box">
-<?php if (!$rows): ?>
-  <p>同じカードを2枚以上所持していないため、限界突破できるカードがありません。</p>
-<?php else: ?>
-  <table>
-    <tr>
-      <th class="num">所持ID</th><th>カード名</th><th>レア</th><th class="num">突破</th>
-      <th class="num">攻撃</th><th class="num">HP</th><th class="num">所持数</th><th>突破後</th><th>状態</th>
-    </tr>
-<?php foreach ($rows as $r): ?>
-<?php
-    $canForge = $r['next_card_id'] !== null && $r['material_num'] > 0;
-    if ($r['next_card_id'] === null) {
-        $reason = '最大まで突破済み';
-    } elseif ($r['material_num'] == 0) {
-        $reason = '素材にできるカードがない（編成中）';
-    } else {
-        $reason = '';
+<section class="group">
+  <div class="group-head">
+    <h2><?= h($first['name']) ?></h2>
+    <span class="count">×<?= h($first['same_num']) ?></span>
+    <span class="to"><?= $first['next_name'] !== null ? '→ 突破後：' . h($first['next_name']) : 'これ以上突破できません' ?></span>
+  </div>
+  <div class="grid">
+<?php foreach ($cards as $r):
+    $badges = [];
+    if ($r['in_team']) {
+        $badges[] = ['編成中', 'team'];
     }
-?>
-    <tr>
-      <td class="num"><?= h($r['user_card_id']) ?></td>
-      <td>
-<?php if ($canForge): ?>
-        <a href="forge_material.php?target_id=<?= h($r['user_card_id']) ?>"><?= h($r['name']) ?></a>
-<?php else: ?>
-        <?= h($r['name']) ?>
-<?php endif; ?>
-      </td>
-      <td class="rarity"><?= stars((int)$r['rarity']) ?></td>
-      <td class="num"><?= h($r['limit_break']) ?></td>
-      <td class="num"><?= h($r['attack']) ?></td>
-      <td class="num"><?= h($r['hp']) ?></td>
-      <td class="num"><?= h($r['same_num']) ?></td>
-      <td><?= $r['next_name'] !== null ? h($r['next_name']) : '-' ?></td>
-      <td>
-        <?php if ($r['in_team']): ?><span class="tag">編成中</span><?php endif; ?>
-        <?php if ($reason !== ''): ?><span class="muted"><?= h($reason) ?></span><?php endif; ?>
-      </td>
-    </tr>
+    if ($r['next_card_id'] === null) {
+        $badges[] = ['最大突破', 'max'];
+        $note = '';
+    } elseif ($r['material_num'] == 0) {
+        $badges[] = ['素材なし', 'warn'];
+        $note = '残りのカードが編成中のため素材にできません';
+    } else {
+        $note = '';
+    }
+    $canForge = $r['next_card_id'] !== null && $r['material_num'] > 0;
+    render_card($r, [
+        'href'     => 'forge_material.php?target_id=' . $r['user_card_id'],
+        'disabled' => !$canForge,
+        'badges'   => $badges,
+        'note'     => $note,
+    ]);
+endforeach; ?>
+  </div>
+</section>
 <?php endforeach; ?>
-  </table>
-<?php endif; ?>
-</div>
-<p class="muted">カード名をクリックすると素材選択へ進みます。編成中のカードは強化対象にはできますが、素材にはできません。</p>
+<p class="muted">※ 編成中のカードも強化はできますが、素材にはできません。</p>
+<p><a class="btn btn-ghost" href="menu.php">メニューに戻る</a></p>
 <?php render_footer(); ?>

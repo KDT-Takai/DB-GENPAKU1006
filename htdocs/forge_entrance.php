@@ -3,6 +3,8 @@
 // 同じcard_idを2枚以上所持しているユーザーカードのみ表示する
 require_once __DIR__ . '/forge_common.php';
 
+$user = require_login();
+
 $sql = <<<SQL
 SELECT
     uc.id                       AS user_card_id,
@@ -40,7 +42,7 @@ ORDER BY uc.card_id, uc.id
 SQL;
 
 $stmt = db()->prepare($sql);
-$stmt->execute([':user_id_sub' => FORGE_USER_ID, ':user_id' => FORGE_USER_ID]);
+$stmt->execute([':user_id_sub' => $user['id'], ':user_id' => $user['id']]);
 $rows = $stmt->fetchAll();
 
 render_header('強化対象カードを選択', 1);

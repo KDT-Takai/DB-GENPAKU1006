@@ -1,8 +1,9 @@
 <?php
-// 限界突破機能 共通処理（DB接続・表示ヘルパー）
+// 共通処理（セッション・DB接続・ログイン確認・表示ヘルパー）
 
-// ログイン機能はないので操作ユーザーは固定
-const FORGE_USER_ID = 1;
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
 function db(): PDO
 {
@@ -32,9 +33,33 @@ function stars(int $rarity): string
     return str_repeat('★', $rarity);
 }
 
-function render_header(string $title, int $step): void
+// ログイン中のユーザー（未ログインならnull）
+function current_user(): ?array
+{
+    if (empty($_SESSION['user_id'])) {
+        return null;
+    }
+    return ['id' => (int)$_SESSION['user_id'], 'name' => (string)$_SESSION['user_name']];
+}
+
+// 未ログインならエラー画面を出して終了する
+function require_login(): array
+{
+    $user = current_user();
+    if ($user === null) {
+        render_header('エラー');
+        echo '<p class="error">カードを強化するには、まず<a href="select_user.php">ユーザーを選択</a>してください。</p>';
+        render_footer();
+        exit;
+    }
+    return $user;
+}
+
+// $step: 限界突破の何画面目か（0 = 限界突破以外の画面）
+function render_header(string $title, int $step = 0): void
 {
     $steps = ['強化対象選択', '素材選択', '強化結果'];
+    $user  = current_user();
     ?>
 <!DOCTYPE html>
 <html lang="ja">
@@ -61,16 +86,34 @@ function render_header(string $title, int $step): void
   .arrow { font-size: 28px; text-align: center; margin: 8px 0; }
   button.link { background: none; border: none; padding: 0; color: #3b6fd8; text-decoration: underline; cursor: pointer; font: inherit; }
   a { color: #3b6fd8; }
+  .header-info { display: flex; justify-content: flex-end; align-items: center; gap: 16px; flex-wrap: wrap;
+                 max-width: 860px; margin: 0 auto 20px; padding-bottom: 10px; border-bottom: 1px solid #dde1e7; font-size: 14px; }
+  .header-info form { margin: 0; }
+  .message { background: #e3ecfb; padding: 12px; border-radius: 6px; }
+  ul.menu { list-style: none; padding: 0; margin: 0; }
+  ul.menu li { padding: 8px 0; border-bottom: 1px solid #e3e5e8; }
+  ul.menu li:last-child { border-bottom: none; }
 </style>
 </head>
 <body>
+<div class="header-info">
+<?php if ($user): ?>
+  <span>ログイン中: <strong><?= h($user['name']) ?></strong> (ID: <?= h($user['id']) ?>)</span>
+  <a href="menu.php">メニューへ戻る</a>
+  <form action="select_user.php" method="post"><button type="submit" name="logout">ログアウト</button></form>
+<?php else: ?>
+  <span>ログインしていません</span> <a href="select_user.php">ユーザー選択画面へ</a>
+<?php endif; ?>
+</div>
 <main>
 <h1><?= h($title) ?></h1>
+<?php if ($step > 0): ?>
 <ol class="steps">
 <?php foreach ($steps as $i => $label): ?>
   <li class="<?= $i + 1 === $step ? 'current' : '' ?>"><?= $i + 1 ?>. <?= h($label) ?></li>
 <?php endforeach; ?>
 </ol>
+<?php endif; ?>
 <?php
 }
 

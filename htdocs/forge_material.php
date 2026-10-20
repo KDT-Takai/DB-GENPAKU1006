@@ -3,6 +3,8 @@
 // 強化対象と同じcard_idのユーザーカード（強化対象自身を除く）を1枚1行で表示する
 require_once __DIR__ . '/forge_common.php';
 
+$user = require_login();
+
 $targetId = filter_input(INPUT_GET, 'target_id', FILTER_VALIDATE_INT);
 
 $target = false;
@@ -15,7 +17,7 @@ if ($targetId) {
            LEFT JOIN cards nc ON nc.id = c.next_card_id
           WHERE uc.id = :id AND uc.user_id = :user_id'
     );
-    $stmt->execute([':id' => $targetId, ':user_id' => FORGE_USER_ID]);
+    $stmt->execute([':id' => $targetId, ':user_id' => $user['id']]);
     $target = $stmt->fetch();
 }
 
@@ -46,7 +48,7 @@ $stmt = db()->prepare(
       ORDER BY uc.id'
 );
 $stmt->execute([
-    ':user_id'   => FORGE_USER_ID,
+    ':user_id'   => $user['id'],
     ':card_id'   => $target['card_id'],
     ':target_id' => $target['user_card_id'],
 ]);

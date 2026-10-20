@@ -3,6 +3,8 @@
 // 強化対象のcard_idを突破後のIDに更新し、素材カードを削除する（トランザクション）
 require_once __DIR__ . '/forge_common.php';
 
+$user = require_login();
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     header('Location: forge_entrance.php');
     exit;
@@ -33,9 +35,9 @@ try {
           WHERE uc.id = :id AND uc.user_id = :user_id
           FOR UPDATE'
     );
-    $stmt->execute([':id' => $targetId, ':user_id' => FORGE_USER_ID]);
+    $stmt->execute([':id' => $targetId, ':user_id' => $user['id']]);
     $before = $stmt->fetch();
-    $stmt->execute([':id' => $materialId, ':user_id' => FORGE_USER_ID]);
+    $stmt->execute([':id' => $materialId, ':user_id' => $user['id']]);
     $material = $stmt->fetch();
 
     if (!$before || !$material) {

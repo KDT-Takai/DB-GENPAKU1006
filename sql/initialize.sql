@@ -12,7 +12,7 @@ USE forge_db;
 -- ユーザー
 -- ----------------------------------------------------------
 CREATE TABLE users (
-    id         INT          NOT NULL PRIMARY KEY,
+    id         INT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
     name       VARCHAR(50)  NOT NULL,
     created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

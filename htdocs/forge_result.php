@@ -1,7 +1,7 @@
 <?php
 // 画面③ 強化結果
 // 強化対象のcard_idを突破後のIDに更新し、素材カードを削除する（トランザクション）
-require_once __DIR__ . '/forge_common.php';
+require_once __DIR__ . '/common.php';
 
 $user = require_login();
 

@@ -1,6 +1,6 @@
 <?php
 // ユーザー選択（ログイン）・ログアウト
-require_once __DIR__ . '/forge_common.php';
+require_once __DIR__ . '/common.php';
 
 $message = '';
 

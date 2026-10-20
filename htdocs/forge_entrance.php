@@ -1,7 +1,7 @@
 <?php
 // 画面① 強化対象カード選択
 // 同じcard_idを2枚以上所持しているユーザーカードのみ表示する
-require_once __DIR__ . '/forge_common.php';
+require_once __DIR__ . '/common.php';
 
 $user = require_login();
 

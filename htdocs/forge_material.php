@@ -1,7 +1,7 @@
 <?php
 // 画面② 素材カード選択
 // 強化対象と同じcard_idのユーザーカード（強化対象自身を除く）を1枚1行で表示する
-require_once __DIR__ . '/forge_common.php';
+require_once __DIR__ . '/common.php';
 
 $user = require_login();
 

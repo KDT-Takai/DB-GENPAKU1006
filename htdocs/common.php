@@ -48,7 +48,7 @@ function require_login(): array
     $user = current_user();
     if ($user === null) {
         render_header('ログインが必要です');
-        render_notice('カードを強化するには、まずユーザーを選択してください。', 'error');
+        render_notice('この機能を使うには、まずユーザーを選択してください。', 'error');
         echo '<p><a class="btn" href="select_user.php">ユーザーを選択する</a></p>';
         render_footer();
         exit;
@@ -60,6 +60,65 @@ function render_notice(string $text, string $type = 'info'): void
 {
     echo '<p class="notice notice-' . h($type) . '">' . h($text) . '</p>';
 }
+
+// 画面をまたいで1回だけ表示するメッセージ（POST→リダイレクト後に表示する用）
+function flash(string $text, string $type = 'ok'): void
+{
+    $_SESSION['flash'] = [$text, $type];
+}
+
+function render_flash(): void
+{
+    if (!empty($_SESSION['flash'])) {
+        [$text, $type] = $_SESSION['flash'];
+        unset($_SESSION['flash']);
+        render_notice($text, $type);
+    }
+}
+
+function redirect(string $url): void
+{
+    header('Location: ' . $url);
+    exit;
+}
+
+function user_gems(int $userId): int
+{
+    $stmt = db()->prepare('SELECT gems FROM users WHERE id = :id');
+    $stmt->execute([':id' => $userId]);
+    return (int)$stmt->fetchColumn();
+}
+
+// チーム編成（slot => カード情報）
+function team_cards(int $userId): array
+{
+    $stmt = db()->prepare(
+        'SELECT t.slot, uc.id AS user_card_id, uc.card_id, c.name, c.rarity, c.limit_break, c.attack, c.hp
+           FROM user_team_cards t
+           JOIN user_cards uc ON uc.id = t.user_card_id
+           JOIN cards c ON c.id = uc.card_id
+          WHERE t.user_id = :user_id
+          ORDER BY t.slot'
+    );
+    $stmt->execute([':user_id' => $userId]);
+    $team = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $team[(int)$row['slot']] = $row;
+    }
+    return $team;
+}
+
+// 戦闘力 = 各カードの ATK + HP/4 の合計
+function team_power(array $team): int
+{
+    $power = 0;
+    foreach ($team as $c) {
+        $power += (int)$c['attack'] + intdiv((int)$c['hp'], 4);
+    }
+    return $power;
+}
+
+const TEAM_SLOTS = 4;
 
 /**
  * カード1枚をタイル表示する
@@ -121,13 +180,26 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
 {
     $steps = ['強化するカードを選ぶ', '素材を選ぶ', '強化結果'];
     $user  = current_user();
+    $gems  = $user ? user_gems($user['id']) : 0;
+
+    // ナビゲーション（ファイル名の先頭が一致したら選択中）
+    $nav = [
+        'menu.php'           => ['ホーム', 'menu'],
+        'gacha.php'          => ['ガチャ', 'gacha'],
+        'cards.php'          => ['カード', 'cards'],
+        'team.php'           => ['編成', 'team'],
+        'forge_entrance.php' => ['限界突破', 'forge'],
+        'battle.php'         => ['バトル', 'battle'],
+        'ranking.php'        => ['ランキング', 'ranking'],
+    ];
+    $script = basename($_SERVER['SCRIPT_NAME'] ?? '');
     ?>
 <!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title><?= h($title) ?> | カード強化</title>
+<title><?= h($title) ?> | STAR CARDS</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&family=Rajdhani:wght@600;700&display=swap" rel="stylesheet">
 <style>
@@ -314,21 +386,110 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
   .user-item form { margin: 0; }
   .user-item .btn { padding: 6px 16px 6px 8px; font-size: 13px; }
   .user-item .btn::before { width: 14px; height: 14px; box-shadow: inset 0 0 0 4px #dcd5c6, inset 0 0 0 6px #1a1b26; }
+
+  /* ナビゲーション */
+  .gems { display: inline-flex; align-items: center; gap: 6px; padding: 3px 12px 3px 6px; border-radius: 999px;
+          background: rgba(0,0,0,.35); border: 1px solid rgba(232,201,143,.35); font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 15px; }
+  .gem-icon { display: inline-block; width: 14px; height: 14px; transform: rotate(45deg); flex: none;
+              background: linear-gradient(135deg, #fff6e0, #9fd4ff 45%, #7b6cff); box-shadow: 0 0 8px rgba(160,200,255,.8); }
+  .gnav { max-width: 1000px; margin: 10px auto 0; display: flex; gap: 4px; flex-wrap: wrap; }
+  .gnav a { color: var(--muted); text-decoration: none; padding: 4px 12px; font-size: 13px; border-bottom: 2px solid transparent; }
+  .gnav a:hover { color: var(--text); }
+  .gnav a.active { color: var(--gold); border-bottom-color: var(--gold); }
+
+  /* テーブル */
+  .table-wrap { overflow-x: auto; }
+  table.list { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.list th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 700; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.list td { padding: 9px 10px; border-bottom: 1px solid rgba(255,255,255,.05); white-space: nowrap; }
+  table.list tr.me td { background: var(--primary-soft); }
+  .num { text-align: right; font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 16px; font-variant-numeric: tabular-nums; }
+  .r-text-3 { color: #8db4ff; } .r-text-4 { color: #c9a2ff; } .r-text-5 { color: #ffd88a; }
+  .win { color: #8ff0b2; font-weight: 700; } .lose { color: #ff9a9a; font-weight: 700; }
+
+  /* ガチャ */
+  .banner { position: relative; overflow: hidden; padding: 32px 28px; margin-bottom: 24px; border: 1px solid rgba(232,201,143,.35);
+            background:
+              radial-gradient(circle at 80% 40%, rgba(255,220,150,.35), transparent 35%),
+              radial-gradient(circle at 75% 45%, rgba(150,120,255,.35), transparent 55%),
+              linear-gradient(120deg, #1b1f45 0%, #2a1f55 50%, #4a3418 100%);
+            clip-path: polygon(0 0, calc(100% - 26px) 0, 100% 26px, 100% 100%, 26px 100%, 0 calc(100% - 26px)); }
+  .banner .en { color: var(--gold); font-size: 12px; letter-spacing: .4em; }
+  .banner h2 { font-size: 30px; margin: 4px 0 8px; letter-spacing: .1em; }
+  .banner p { color: #d8d6e8; margin: 0 0 16px; max-width: 520px; }
+  .banner .pickup { display: flex; gap: 8px; flex-wrap: wrap; }
+  .banner .pickup span { padding: 3px 12px; border: 1px solid rgba(255,216,138,.6); color: #ffd88a; font-size: 13px; background: rgba(0,0,0,.3); }
+  .pity { display: flex; align-items: center; gap: 12px; margin-top: 18px; font-size: 13px; color: var(--muted); }
+  .pity-bar { flex: 1; max-width: 320px; height: 6px; background: rgba(255,255,255,.12); border-radius: 3px; overflow: hidden; }
+  .pity-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold-deep), #ffd88a); }
+  .pull-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+  .pull-row form { margin: 0; }
+  .pull-row .btn small { font-family: "Rajdhani", sans-serif; font-weight: 700; margin-left: 6px; display: inline-flex; align-items: center; gap: 4px; }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; transform: none; }
+  .gacha-result .card { animation: reveal .5s both; }
+  .gacha-result .card:nth-child(1) { animation-delay: 0s; } .gacha-result .card:nth-child(2) { animation-delay: 0.08s; } .gacha-result .card:nth-child(3) { animation-delay: 0.16s; } .gacha-result .card:nth-child(4) { animation-delay: 0.24s; } .gacha-result .card:nth-child(5) { animation-delay: 0.32s; } .gacha-result .card:nth-child(6) { animation-delay: 0.4s; } .gacha-result .card:nth-child(7) { animation-delay: 0.48s; } .gacha-result .card:nth-child(8) { animation-delay: 0.56s; } .gacha-result .card:nth-child(9) { animation-delay: 0.64s; } .gacha-result .card:nth-child(10) { animation-delay: 0.72s; }
+  .gacha-result .card.r5 { box-shadow: inset 0 0 0 1px rgba(255,216,138,.8), 0 0 24px rgba(255,200,100,.6); }
+  .gacha-result .card.r4 { box-shadow: inset 0 0 0 1px rgba(200,160,255,.7), 0 0 18px rgba(170,120,255,.45); }
+  @keyframes reveal { from { opacity: 0; transform: translateY(14px) scale(.96); } to { opacity: 1; transform: none; } }
+  .badge-new { color: #1a1b26; background: #ffd88a; border-color: #ffd88a; }
+
+  /* チーム編成 */
+  .slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+  .slot-empty { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px; min-height: 250px;
+                border: 1px dashed rgba(255,255,255,.25); color: var(--muted); text-decoration: none; font-size: 13px;
+                clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); transition: border-color .15s, color .15s; }
+  .slot-empty::before { content: "+"; font-size: 34px; line-height: 1; font-weight: 300; }
+  .slot-empty:hover { border-color: var(--gold); color: var(--gold); }
+  .slot-wrap { display: flex; flex-direction: column; gap: 8px; }
+  .slot-wrap.selected .card { filter: drop-shadow(0 0 12px rgba(232,201,143,.7)); }
+  .slot-label { font-family: "Rajdhani", sans-serif; font-size: 12px; color: var(--muted); letter-spacing: .2em; }
+  .slot-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .slot-actions form { margin: 0; }
+  .mini { font: inherit; font-size: 12px; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 999px;
+          padding: 2px 10px; cursor: pointer; text-decoration: none; }
+  .mini:hover { border-color: var(--gold); }
+  .power { display: flex; align-items: baseline; gap: 10px; }
+  .power .en { color: var(--muted); font-size: 12px; }
+  .power b { font-family: "Rajdhani", sans-serif; font-size: 32px; color: var(--gold); text-shadow: 0 0 10px rgba(232,201,143,.5); }
+  @media (max-width: 720px) { .slots { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+  /* バトル・ホーム */
+  .vs { display: grid; grid-template-columns: 1fr auto 1fr; gap: 16px; align-items: center; text-align: center; }
+  .vs .side .name { font-weight: 700; font-size: 18px; }
+  .vs .vs-mark { font-family: "Rajdhani", sans-serif; font-size: 34px; font-weight: 700; color: var(--gold); letter-spacing: .1em; }
+  .result-word { font-family: "Rajdhani", sans-serif; font-size: 48px; font-weight: 700; letter-spacing: .3em; text-align: center; margin: 0; }
+  .result-word.win { color: #ffd88a; text-shadow: 0 0 20px rgba(255,216,138,.7); }
+  .result-word.lose { color: #9aa0b8; }
+  .stat-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; margin-bottom: 24px; }
+  .stat { padding: 16px 18px; background: var(--surface); border: 1px solid var(--line); }
+  .stat .en { display: block; font-size: 11px; color: var(--muted); }
+  .stat b { font-family: "Rajdhani", sans-serif; font-size: 26px; }
+  .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 18px; align-items: center; }
+  .filters a { color: var(--muted); text-decoration: none; padding: 4px 14px; border: 1px solid var(--line); border-radius: 999px; font-size: 13px; }
+  .filters a.active { color: #1a1b26; background: var(--gold); border-color: var(--gold); font-weight: 700; }
+  .filters .sep { width: 1px; height: 20px; background: var(--line); margin: 0 6px; }
 </style>
 </head>
 <body>
 <header class="appbar">
   <div class="appbar-inner">
-    <a class="brand" href="menu.php">CARD FORGE</a>
+    <a class="brand" href="menu.php">STAR CARDS</a>
 <?php if ($user): ?>
-    <span class="who">ログイン中: <strong><?= h($user['name']) ?></strong>（ID: <?= h($user['id']) ?>）</span>
-    <a class="plain" href="menu.php">メニュー</a>
+    <span class="gems" title="石"><i class="gem-icon"></i><?= number_format($gems) ?></span>
+    <span class="who"><strong><?= h($user['name']) ?></strong>（ID: <?= h($user['id']) ?>）</span>
+    <a class="plain" href="select_user.php">切替</a>
     <form action="select_user.php" method="post"><button type="submit" name="logout">ログアウト</button></form>
 <?php else: ?>
     <span class="who">ログインしていません</span>
     <a class="plain" href="select_user.php">ユーザーを選択</a>
 <?php endif; ?>
   </div>
+  <nav class="gnav">
+<?php foreach ($nav as $file => [$label, $key]):
+    $active = $script === $file || ($key === 'forge' && str_starts_with($script, 'forge_')); ?>
+    <a href="<?= h($file) ?>" class="<?= $active ? 'active' : '' ?>"><?= h($label) ?></a>
+<?php endforeach; ?>
+  </nav>
 </header>
 <main>
 <?php if ($step > 0): ?>

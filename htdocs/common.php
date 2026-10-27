@@ -120,6 +120,121 @@ function team_power(array $team): int
 
 const TEAM_SLOTS = 4;
 
+// ---------- ターン制バトル（クエスト・対戦で共通） ----------
+const BATTLE_MAX_TURNS = 10;
+
+// チーム（team_cards の戻り値）をバトル用のユニットに変換する
+function card_units(array $team): array
+{
+    $units = [];
+    foreach ($team as $c) {
+        $units[] = ['name' => $c['name'], 'image' => $c['image'], 'attack' => (int)$c['attack'],
+                    'hp' => (int)$c['hp'], 'max_hp' => (int)$c['hp'], 'boss' => false];
+    }
+    return $units;
+}
+
+/**
+ * 味方 → 敵 の順に1体ずつ攻撃するターン制バトル
+ * - 攻撃する相手は、生き残っている相手からランダム
+ * - ダメージは ATK の 85〜115%。15% の確率で会心（1.5倍）
+ * - ボスは3ターンごとに全体攻撃（全員に ATK の 60%）
+ * - BATTLE_MAX_TURNS ターンで敵を全滅できなければ時間切れで敗北
+ * 戻り値: result（win/lose）, turns, ko（倒された味方の数）, allies, enemies（戦闘後のHP）, log
+ */
+function simulate_battle(array $allies, array $enemies): array
+{
+    $units = ['ally' => array_values($allies), 'enemy' => array_values($enemies)];
+    $log   = [];
+    $alive = function (string $side) use (&$units): array {
+        return array_keys(array_filter($units[$side], fn($u) => $u['hp'] > 0));
+    };
+
+    $hit = function (string $side, int $i, int $t, float $rate, array $tags) use (&$units, &$log, &$turn): void {
+        $foe    = $side === 'ally' ? 'enemy' : 'ally';
+        $crit   = random_int(1, 100) <= 15;
+        $damage = (int)round($units[$side][$i]['attack'] * $rate * random_int(85, 115) / 100 * ($crit ? 1.5 : 1));
+        $units[$foe][$t]['hp'] = max(0, $units[$foe][$t]['hp'] - $damage);
+        $ko = $units[$foe][$t]['hp'] === 0;
+        if ($crit) $tags[] = 'crit';
+        if ($ko)   $tags[] = 'ko';
+        $log[] = ['turn' => $turn, 'side' => $side, 'tags' => $tags,
+                  'actor' => $units[$side][$i]['name'], 'target' => $units[$foe][$t]['name'], 'damage' => $damage];
+    };
+
+    $result = 'lose';
+    for ($turn = 1; $turn <= BATTLE_MAX_TURNS; $turn++) {
+        foreach (['ally' => 'enemy', 'enemy' => 'ally'] as $side => $foe) {
+            foreach (array_keys($units[$side]) as $i) {
+                if ($units[$side][$i]['hp'] <= 0) continue;
+                $targets = $alive($foe);
+                if (!$targets) break 2;
+                if (!empty($units[$side][$i]['boss']) && $turn % 3 === 0) {
+                    foreach ($targets as $t) $hit($side, $i, $t, 0.6, ['aoe']);
+                } else {
+                    $hit($side, $i, $targets[array_rand($targets)], 1.0, []);
+                }
+            }
+        }
+        if (!$alive('enemy')) { $result = 'win'; break; }
+        if (!$alive('ally'))  break;
+    }
+
+    return [
+        'result'  => $result,
+        'turns'   => min($turn, BATTLE_MAX_TURNS),
+        'timeout' => $result === 'lose' && $alive('ally') !== [],
+        'ko'      => count($units['ally']) - count($alive('ally')),
+        'allies'  => $units['ally'],
+        'enemies' => $units['enemy'],
+        'log'     => $log,
+    ];
+}
+
+// バトル後のユニットのHPと、ターンごとの戦闘ログを表示する
+function render_battle(array $battle, string $allyLabel, string $enemyLabel): void
+{
+    $side = function (array $units, string $label, string $cls): void { ?>
+  <div class="unit-side <?= $cls ?>">
+    <div class="muted"><?= h($label) ?></div>
+    <div class="unit-row">
+<?php foreach ($units as $u): $rate = $u['max_hp'] > 0 ? $u['hp'] / $u['max_hp'] * 100 : 0; ?>
+      <div class="unit<?= $u['hp'] <= 0 ? ' down' : '' ?><?= !empty($u['boss']) ? ' boss' : '' ?>">
+        <?php if ($u['image'] !== ''): ?><img src="resource/cards/<?= h($u['image']) ?>" alt=""><?php endif; ?>
+        <div class="unit-name"><?= !empty($u['boss']) ? '<span class="boss-tag">BOSS</span>' : '' ?><?= h($u['name']) ?></div>
+        <div class="hpbar"><i style="width:<?= round($rate, 1) ?>%"></i></div>
+        <div class="unit-hp"><?= number_format($u['hp']) ?> / <?= number_format($u['max_hp']) ?></div>
+      </div>
+<?php endforeach; ?>
+    </div>
+  </div>
+<?php };
+    echo '<div class="unit-sides">';
+    $side($battle['allies'], $allyLabel, 'ally');
+    $side($battle['enemies'], $enemyLabel, 'enemy');
+    echo '</div>';
+?>
+  <details class="battle-log" open>
+    <summary>戦闘ログ（<?= h($battle['turns']) ?> ターン）</summary>
+    <ol>
+<?php $prevTurn = 0; foreach ($battle['log'] as $n => $l): ?>
+<?php if ($l['turn'] !== $prevTurn): $prevTurn = $l['turn']; ?>
+      <li class="turn" style="--i:<?= min($n, 60) ?>">TURN <?= h($l['turn']) ?></li>
+<?php endif; ?>
+      <li class="<?= h($l['side']) ?> <?= h(implode(' ', $l['tags'])) ?>" style="--i:<?= min($n, 60) ?>">
+        <b><?= h($l['actor']) ?></b><?= in_array('aoe', $l['tags'], true) ? ' の全体攻撃！' : ' の攻撃' ?>
+        → <?= h($l['target']) ?> に <span class="dmg"><?= number_format($l['damage']) ?></span><?= in_array('crit', $l['tags'], true) ? ' <span class="crit-tag">会心！</span>' : '' ?>
+        <?= in_array('ko', $l['tags'], true) ? '<span class="ko-tag">' . h($l['target']) . ' は倒れた</span>' : '' ?>
+      </li>
+<?php endforeach; ?>
+<?php if ($battle['timeout']): ?>
+      <li class="turn">時間切れ（<?= BATTLE_MAX_TURNS ?> ターン以内に倒せなかった）</li>
+<?php endif; ?>
+    </ol>
+  </details>
+<?php
+}
+
 /**
  * カード1枚をタイル表示する
  * $c    : name, rarity, limit_break, attack, hp を含む配列（user_card_id があれば所持IDも表示）
@@ -193,7 +308,8 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
         'cards.php'          => ['カード', 'cards'],
         'team.php'           => ['編成', 'team'],
         'forge_entrance.php' => ['限界突破', 'forge'],
-        'battle.php'         => ['バトル', 'battle'],
+        'quest.php'          => ['クエスト', 'quest'],
+        'battle.php'         => ['対戦', 'battle'],
         'ranking.php'        => ['ランキング', 'ranking'],
     ];
     $script = basename($_SERVER['SCRIPT_NAME'] ?? '');
@@ -486,6 +602,63 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
   .filters a { color: var(--muted); text-decoration: none; padding: 4px 14px; border: 1px solid var(--line); border-radius: 999px; font-size: 13px; }
   .filters a.active { color: #1a1b26; background: var(--gold); border-color: var(--gold); font-weight: 700; }
   .filters .sep { width: 1px; height: 20px; background: var(--line); margin: 0 6px; }
+
+  /* バトル結果（ユニットのHP・戦闘ログ） */
+  .unit-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 18px 0; }
+  .unit-side.enemy { text-align: right; }
+  .unit-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin-top: 6px; }
+  .unit { position: relative; padding: 8px; background: var(--surface-2); border: 1px solid var(--line); text-align: center; }
+  .unit img { width: 100%; height: 64px; object-fit: contain; }
+  .unit.boss { border-color: rgba(255,140,140,.6); box-shadow: 0 0 14px rgba(255,90,90,.25) inset; }
+  .unit.down { filter: grayscale(1) brightness(.45); }
+  .unit-name { font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .unit-hp { font-family: "Rajdhani", sans-serif; font-size: 12px; color: var(--muted); }
+  .hpbar { height: 5px; background: rgba(255,255,255,.12); border-radius: 3px; overflow: hidden; margin: 4px 0 2px; }
+  .hpbar i { display: block; height: 100%; background: linear-gradient(90deg, #5fd38a, #b8f5c8); }
+  .unit-side.enemy .hpbar i { background: linear-gradient(90deg, #ff7a7a, #ffc2a8); }
+  .boss-tag, .crit-tag, .ko-tag { font-size: 10px; font-weight: 700; padding: 0 6px; border-radius: 999px; margin: 0 4px; }
+  .boss-tag { background: #ff7a7a; color: #1a1b26; }
+  .crit-tag { background: #ffd88a; color: #1a1b26; }
+  .ko-tag { border: 1px solid rgba(255,140,140,.6); color: #ffb3b3; }
+  .battle-log summary { cursor: pointer; font-weight: 700; margin-bottom: 8px; }
+  .battle-log ol { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font-size: 13px; }
+  .battle-log li { padding: 3px 10px; border-left: 2px solid transparent; animation: reveal .3s both; animation-delay: calc(var(--i, 0) * 45ms); }
+  .battle-log li.ally { border-left-color: #5fd38a; }
+  .battle-log li.enemy { border-left-color: #ff7a7a; color: #e2dbe6; }
+  .battle-log li.aoe { background: rgba(255,90,90,.10); }
+  .battle-log li.turn { font-family: "Rajdhani", sans-serif; color: var(--gold); letter-spacing: .2em; margin-top: 8px; }
+  .battle-log .dmg { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 15px; }
+  @media (max-width: 720px) { .unit-sides { grid-template-columns: 1fr; } .unit-side.enemy { text-align: left; } }
+
+  /* クエスト */
+  .chapter { margin-bottom: 30px; }
+  .chapter-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .chapter-head h2 { margin: 0; font-size: 18px; }
+  .chapter-head .en { color: var(--gold); font-size: 12px; }
+  .chapter-head .muted { width: 100%; }
+  .chapter-head .star-total { margin-left: auto; color: #ffd88a; font-family: "Rajdhani", sans-serif; font-weight: 700; }
+  .stage-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .stage { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--line);
+           clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%); }
+  .stage.boss { border-color: rgba(255,140,140,.45); background: linear-gradient(120deg, rgba(255,90,90,.12), var(--surface) 60%); }
+  .stage.locked { opacity: .45; }
+  .stage.next { border-color: rgba(232,201,143,.7); box-shadow: 0 0 18px rgba(232,201,143,.2) inset; }
+  .stage-top { display: flex; align-items: center; gap: 10px; }
+  .stage-no { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 20px; color: var(--gold); }
+  .stage-name { font-weight: 700; font-size: 16px; }
+  .stage-stars { margin-left: auto; letter-spacing: 2px; color: rgba(255,255,255,.2); }
+  .stage-stars .on { color: #ffd88a; text-shadow: 0 0 6px rgba(255,200,100,.7); }
+  .stage-enemies { display: flex; gap: 4px; }
+  .stage-enemies img { width: 34px; height: 34px; object-fit: contain; background: rgba(0,0,0,.25); border-radius: 50%; padding: 2px; }
+  .stage-foot { display: flex; align-items: center; gap: 10px; margin-top: auto; padding-top: 6px; flex-wrap: wrap; }
+  .stage-foot form { margin: 0 0 0 auto; }
+  .stage-foot .btn { padding: 6px 16px 6px 8px; font-size: 13px; }
+  .stage-foot .btn::before { width: 14px; height: 14px; box-shadow: inset 0 0 0 4px #dcd5c6, inset 0 0 0 6px #1a1b26; }
+  .star-goals { list-style: none; padding: 0; margin: 14px auto 0; max-width: 360px; font-size: 14px; }
+  .star-goals li { display: flex; gap: 10px; padding: 3px 0; color: var(--muted); }
+  .star-goals li::before { content: "★"; color: rgba(255,255,255,.2); }
+  .star-goals li.ok { color: var(--text); }
+  .star-goals li.ok::before { color: #ffd88a; text-shadow: 0 0 6px rgba(255,200,100,.7); }
 </style>
 </head>
 <body>

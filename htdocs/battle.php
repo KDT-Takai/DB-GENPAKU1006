@@ -1,5 +1,5 @@
 <?php
-// バトル（他ユーザーのチームと戦闘力で対戦。勝つと石がもらえる）
+// 対戦（他ユーザーのチームとターン制バトル。勝つと石がもらえる）
 require_once __DIR__ . '/common.php';
 
 $user = require_login();
@@ -17,10 +17,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (!$oppTeam) {
         flash('その相手とは対戦できません。', 'error');
     } else {
-        // 基本の戦闘力に ±15% のブレをつける
-        $myPower  = (int)round(team_power($myTeam)  * random_int(85, 115) / 100);
-        $oppPower = (int)round(team_power($oppTeam) * random_int(85, 115) / 100);
-        $result   = $myPower >= $oppPower ? 'win' : 'lose';
+        $battle   = simulate_battle(card_units($myTeam), card_units($oppTeam));
+        $myPower  = team_power($myTeam);
+        $oppPower = team_power($oppTeam);
+        $result   = $battle['result'];
         $reward   = $result === 'win' ? REWARD_WIN : REWARD_LOSE;
 
         $pdo = db();
@@ -36,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $_SESSION['battle_result'] = [
             'opponent_id' => $opponentId, 'result' => $result,
-            'my_power' => $myPower, 'opp_power' => $oppPower, 'reward' => $reward,
+            'my_power' => $myPower, 'opp_power' => $oppPower, 'reward' => $reward, 'battle' => $battle,
         ];
     }
     redirect('battle.php');
@@ -75,7 +75,7 @@ $stmt = db()->prepare(
 $stmt->execute([':id' => $user['id']]);
 $histories = $stmt->fetchAll();
 
-render_header('バトル', 0, '自分のチームで他のユーザーと対戦します。勝利で石 ' . REWARD_WIN . '、敗北でも石 ' . REWARD_LOSE . ' がもらえます。');
+render_header('対戦', 0,'自分のチームで他のユーザーと対戦します。勝利で石 ' . REWARD_WIN . '、敗北でも石 ' . REWARD_LOSE . ' がもらえます。');
 render_flash();
 ?>
 <?php if ($last): ?>
@@ -87,6 +87,11 @@ render_flash();
     <div class="side"><div class="muted">相手</div><div class="name"><?= h($lastOpp) ?></div><div class="num" style="text-align:center"><?= number_format($last['opp_power']) ?></div></div>
   </div>
   <p style="text-align:center; margin:0">報酬：<span class="gems"><i class="gem-icon"></i><?= h($last['reward']) ?></span></p>
+<?php render_battle($last['battle'], 'あなた', $lastOpp); ?>
+  <form method="post" action="battle.php" class="actions" style="justify-content:center">
+    <input type="hidden" name="opponent_id" value="<?= h($last['opponent_id']) ?>">
+    <button type="submit" class="btn">もう一度対戦</button>
+  </form>
 </section>
 <?php endif; ?>
 

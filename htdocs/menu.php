@@ -52,7 +52,8 @@ $menus = [
     ['cards.php',          'Collection',  '所持カード',     '持っているカードを確認します'],
     ['team.php',           'Team',        'チーム編成',     'バトルに出す4枚を選びます'],
     ['forge_entrance.php', 'Limit Break', '限界突破',       '同じカード2枚で上位カードに強化します'],
-    ['battle.php',         'Battle',      'バトル',         '他のユーザーのチームと対戦します'],
+    ['quest.php',          'Quest',       'クエスト',       '全3章12ステージを攻略して石と★を集めます'],
+    ['battle.php',         'Battle',      '対戦',           '他のユーザーのチームと対戦します'],
     ['ranking.php',        'Ranking',     'ランキング',     '対戦の勝利数ランキングを見ます'],
 ];
 

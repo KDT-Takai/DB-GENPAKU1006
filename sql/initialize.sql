@@ -202,3 +202,6 @@ INSERT INTO battle_histories (user_id, opponent_user_id, result, user_power, opp
 (3, 2, 'win',  3500, 1650, 60, NOW() - INTERVAL 2 DAY),
 (3, 1, 'win',  3300, 3100, 60, NOW() - INTERVAL 1 DAY),
 (1, 2, 'win',  3200, 1800, 60, NOW() - INTERVAL 1 DAY);
+
+-- クエスト（ステージ）のテーブルとマスタデータ
+SOURCE /root/sql/stages.sql;

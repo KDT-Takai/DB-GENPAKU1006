@@ -79,19 +79,21 @@ render_header('対戦', 0,'自分のチームで他のユーザーと対戦し�
 render_flash();
 ?>
 <?php if ($last): ?>
-<section class="panel">
-  <p class="result-word <?= h($last['result']) ?>"><?= $last['result'] === 'win' ? 'VICTORY' : 'DEFEAT' ?></p>
-  <div class="vs" style="margin: 12px 0">
+<section class="panel battle" data-battle>
+  <div class="vs" style="margin: 0 0 4px">
     <div class="side"><div class="muted">あなた</div><div class="name"><?= h($user['name']) ?></div><div class="num" style="text-align:center"><?= number_format($last['my_power']) ?></div></div>
     <div class="vs-mark">VS</div>
     <div class="side"><div class="muted">相手</div><div class="name"><?= h($lastOpp) ?></div><div class="num" style="text-align:center"><?= number_format($last['opp_power']) ?></div></div>
   </div>
-  <p style="text-align:center; margin:0">報酬：<span class="gems"><i class="gem-icon"></i><?= h($last['reward']) ?></span></p>
-<?php render_battle($last['battle'], 'あなた', $lastOpp); ?>
-  <form method="post" action="battle.php" class="actions" style="justify-content:center">
-    <input type="hidden" name="opponent_id" value="<?= h($last['opponent_id']) ?>">
-    <button type="submit" class="btn">もう一度対戦</button>
-  </form>
+<?php render_battle($last['battle'], $user['name'], (string)$lastOpp); ?>
+  <div class="battle-after">
+    <p class="result-word <?= h($last['result']) ?>"><?= $last['result'] === 'win' ? 'VICTORY' : 'DEFEAT' ?></p>
+    <p style="text-align:center; margin:0">報酬：<span class="gems"><i class="gem-icon"></i><?= h($last['reward']) ?></span></p>
+    <form method="post" action="battle.php" class="actions" style="justify-content:center; margin-top:16px">
+      <input type="hidden" name="opponent_id" value="<?= h($last['opponent_id']) ?>">
+      <button type="submit" class="btn">もう一度対戦</button>
+    </form>
+  </div>
 </section>
 <?php endif; ?>
 

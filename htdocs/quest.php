@@ -121,8 +121,10 @@ render_header('クエスト', 0, 'ステージを順番に攻略します。初�
 render_flash();
 ?>
 <?php if ($last): $ls = $stageById[$last['stage_id']]; $lb = $last['battle']; ?>
-<section class="panel" id="result">
+<section class="panel battle" id="result" data-battle>
   <p class="muted" style="text-align:center; margin:0"><?= h(stage_label($ls)) ?>　<?= h($ls['name']) ?></p>
+<?php render_battle($lb, 'Your Team', 'Enemy'); ?>
+  <div class="battle-after">
   <p class="result-word <?= h($lb['result']) ?>"><?= $lb['result'] === 'win' ? 'CLEAR' : ($lb['timeout'] ? 'TIME UP' : 'DEFEAT') ?></p>
   <ul class="star-goals">
 <?php foreach ($last['goals'] as $text => $ok): ?>
@@ -136,12 +138,12 @@ render_flash();
     <span class="muted">チームを強化して再挑戦しよう（ガチャ・限界突破・編成の見直し）</span>
 <?php endif; ?>
   </p>
-<?php render_battle($lb, 'あなたのチーム', '敵'); ?>
-  <div class="actions" style="justify-content:center">
+  <div class="actions" style="justify-content:center; margin-top:16px">
     <form method="post" action="quest.php" style="margin:0"><input type="hidden" name="stage_id" value="<?= h($ls['id']) ?>"><button type="submit" class="btn">もう一度挑戦</button></form>
 <?php if ($lb['result'] === 'win' && isset($stageById[$ls['id'] + 1])): ?>
     <form method="post" action="quest.php" style="margin:0"><input type="hidden" name="stage_id" value="<?= h($ls['id'] + 1) ?>"><button type="submit" class="btn btn-ghost">次のステージへ（<?= h(stage_label($stageById[$ls['id'] + 1])) ?>）</button></form>
 <?php endif; ?>
+  </div>
   </div>
 </section>
 <?php endif; ?>

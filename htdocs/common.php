@@ -158,7 +158,8 @@ function simulate_battle(array $allies, array $enemies): array
         $ko = $units[$foe][$t]['hp'] === 0;
         if ($crit) $tags[] = 'crit';
         if ($ko)   $tags[] = 'ko';
-        $log[] = ['turn' => $turn, 'side' => $side, 'tags' => $tags,
+        // a / t：攻撃した側・された側のユニット番号、hp：攻撃を受けた後の残りHP（戦闘シーンの再生に使う）
+        $log[] = ['turn' => $turn, 'side' => $side, 'tags' => $tags, 'a' => $i, 't' => $t, 'hp' => $units[$foe][$t]['hp'],
                   'actor' => $units[$side][$i]['name'], 'target' => $units[$foe][$t]['name'], 'damage' => $damage];
     };
 
@@ -191,15 +192,20 @@ function simulate_battle(array $allies, array $enemies): array
     ];
 }
 
-// バトル後のユニットのHPと、ターンごとの戦闘ログを表示する
+/**
+ * 戦闘シーン（敵が上・味方が下）と戦闘ログを表示する
+ * 呼び出し側は data-battle 属性を付けた要素の中でこの関数を呼ぶ。
+ * 同じ要素の中の .battle-after（勝敗・報酬など）は、戦闘シーンの再生が終わってから表示される。
+ * JavaScript が無効なときは、戦闘後の状態とログをそのまま表示する。
+ */
 function render_battle(array $battle, string $allyLabel, string $enemyLabel): void
 {
     $side = function (array $units, string $label, string $cls): void { ?>
   <div class="unit-side <?= $cls ?>">
-    <div class="muted"><?= h($label) ?></div>
+    <div class="side-label en"><?= h($label) ?></div>
     <div class="unit-row">
 <?php foreach ($units as $u): $rate = $u['max_hp'] > 0 ? $u['hp'] / $u['max_hp'] * 100 : 0; ?>
-      <div class="unit<?= $u['hp'] <= 0 ? ' down' : '' ?><?= !empty($u['boss']) ? ' boss' : '' ?>">
+      <div class="unit<?= $u['hp'] <= 0 ? ' down' : '' ?><?= !empty($u['boss']) ? ' boss' : '' ?>" data-max="<?= h($u['max_hp']) ?>" data-final="<?= h($u['hp']) ?>">
         <?php if ($u['image'] !== ''): ?><img src="resource/cards/<?= h($u['image']) ?>" alt=""><?php endif; ?>
         <div class="unit-name"><?= !empty($u['boss']) ? '<span class="boss-tag">BOSS</span>' : '' ?><?= h($u['name']) ?></div>
         <div class="hpbar"><i style="width:<?= round($rate, 1) ?>%"></i></div>
@@ -209,19 +215,24 @@ function render_battle(array $battle, string $allyLabel, string $enemyLabel): vo
     </div>
   </div>
 <?php };
-    echo '<div class="unit-sides">';
-    $side($battle['allies'], $allyLabel, 'ally');
-    $side($battle['enemies'], $enemyLabel, 'enemy');
-    echo '</div>';
 ?>
+  <div class="arena" data-log="<?= h(json_encode($battle['log'], JSON_UNESCAPED_UNICODE)) ?>">
+    <div class="battle-controls">
+      <button type="button" class="mini" data-speed>×1</button>
+      <button type="button" class="mini" data-skip>スキップ</button>
+    </div>
+<?php $side($battle['enemies'], $enemyLabel, 'enemy'); ?>
+    <div class="turn-banner en">BATTLE</div>
+<?php $side($battle['allies'], $allyLabel, 'ally'); ?>
+  </div>
   <details class="battle-log" open>
     <summary>戦闘ログ（<?= h($battle['turns']) ?> ターン）</summary>
     <ol>
 <?php $prevTurn = 0; foreach ($battle['log'] as $n => $l): ?>
 <?php if ($l['turn'] !== $prevTurn): $prevTurn = $l['turn']; ?>
-      <li class="turn" style="--i:<?= min($n, 60) ?>">TURN <?= h($l['turn']) ?></li>
+      <li class="turn" data-turn="<?= h($l['turn']) ?>">TURN <?= h($l['turn']) ?></li>
 <?php endif; ?>
-      <li class="<?= h($l['side']) ?> <?= h(implode(' ', $l['tags'])) ?>" style="--i:<?= min($n, 60) ?>">
+      <li class="<?= h($l['side']) ?> <?= h(implode(' ', $l['tags'])) ?>" data-n="<?= $n ?>">
         <b><?= h($l['actor']) ?></b><?= in_array('aoe', $l['tags'], true) ? ' の全体攻撃！' : ' の攻撃' ?>
         → <?= h($l['target']) ?> に <span class="dmg"><?= number_format($l['damage']) ?></span><?= in_array('crit', $l['tags'], true) ? ' <span class="crit-tag">会心！</span>' : '' ?>
         <?= in_array('ko', $l['tags'], true) ? '<span class="ko-tag">' . h($l['target']) . ' は倒れた</span>' : '' ?>
@@ -232,6 +243,106 @@ function render_battle(array $battle, string $allyLabel, string $enemyLabel): vo
 <?php endif; ?>
     </ol>
   </details>
+<script>
+// 戦闘シーンの再生：サーバーで決まった戦闘ログを1手ずつアニメーションで見せる
+(function () {
+  var root = document.currentScript.closest('[data-battle]');
+  if (!root) return;
+  var arena  = root.querySelector('.arena');
+  var log    = JSON.parse(arena.dataset.log || '[]');
+  if (!log.length || log[0].a === undefined) return;
+  var units  = { ally: arena.querySelectorAll('.unit-side.ally .unit'), enemy: arena.querySelectorAll('.unit-side.enemy .unit') };
+  var banner = arena.querySelector('.turn-banner');
+  var logBox = root.querySelector('.battle-log ol');
+  var items  = root.querySelectorAll('.battle-log li');
+  var speedBtn = arena.querySelector('[data-speed]');
+  var speeds = [1, 2, 4], speed = 1, timer = null, done = false;
+  try { speed = speeds.indexOf(+localStorage.getItem('battleSpeed')) >= 0 ? +localStorage.getItem('battleSpeed') : 1; } catch (e) {}
+  speedBtn.textContent = '×' + speed;
+
+  function setHp(u, hp) {
+    var max = +u.dataset.max;
+    u.querySelector('.hpbar i').style.width = (max > 0 ? hp / max * 100 : 0) + '%';
+    u.querySelector('.unit-hp').textContent = hp.toLocaleString() + ' / ' + max.toLocaleString();
+    u.classList.toggle('down', hp <= 0);
+  }
+  function replay(el, cls) { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); }
+  function popDamage(u, e) {
+    var pop = document.createElement('span');
+    pop.className = 'dmg-pop' + (e.tags.indexOf('crit') >= 0 ? ' crit' : '');
+    pop.textContent = (e.tags.indexOf('crit') >= 0 ? '会心 ' : '') + e.damage.toLocaleString();
+    u.appendChild(pop);
+    setTimeout(function () { pop.remove(); }, 900);
+  }
+  function show(li) { if (li) { li.classList.remove('pending'); logBox.scrollTop = logBox.scrollHeight; } }
+  function wait(fn, ms) { timer = setTimeout(fn, ms / speed); }
+
+  // 同じボスの全体攻撃はまとめて1手として再生する
+  var steps = [];
+  log.forEach(function (e, n) {
+    e.n = n;
+    var last = steps[steps.length - 1];
+    if (e.tags.indexOf('aoe') >= 0 && last && last[0].tags.indexOf('aoe') >= 0 &&
+        last[0].a === e.a && last[0].side === e.side && last[0].turn === e.turn) last.push(e);
+    else steps.push([e]);
+  });
+
+  root.classList.add('playing');
+  ['ally', 'enemy'].forEach(function (s) { units[s].forEach(function (u) { setHp(u, +u.dataset.max); }); });
+  items.forEach(function (li) { li.classList.add('pending'); });
+
+  var i = 0, turn = 0;
+  function next() {
+    if (i >= steps.length) return wait(finish, 500);
+    var step = steps[i++], e0 = step[0];
+    var foe = e0.side === 'ally' ? 'enemy' : 'ally';
+    var actor = units[e0.side][e0.a];
+    if (e0.turn !== turn) {
+      turn = e0.turn;
+      banner.textContent = 'TURN ' + turn;
+      replay(banner, 'pop');
+      show(root.querySelector('.battle-log li[data-turn="' + turn + '"]'));
+    }
+    actor.classList.add('acting');
+    var aoe = e0.tags.indexOf('aoe') >= 0;
+    if (aoe) { banner.textContent = '全体攻撃！'; replay(banner, 'pop'); replay(arena, 'flash'); }
+    wait(function () {
+      step.forEach(function (e) {
+        var target = units[foe][e.t];
+        setHp(target, e.hp);
+        replay(target, e.hp <= 0 ? 'ko' : 'hit');
+        popDamage(target, e);
+        show(root.querySelector('.battle-log li[data-n="' + e.n + '"]'));
+      });
+      wait(function () {
+        actor.classList.remove('acting');
+        if (aoe) banner.textContent = 'TURN ' + turn;
+        wait(next, 160);
+      }, aoe ? 600 : 380);
+    }, aoe ? 500 : 260);
+  }
+
+  function finish() {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    ['ally', 'enemy'].forEach(function (s) { units[s].forEach(function (u) { u.classList.remove('acting'); setHp(u, +u.dataset.final); }); });
+    items.forEach(show);
+    banner.textContent = 'FINISH';
+    replay(banner, 'pop');
+    root.classList.remove('playing');
+    root.querySelectorAll('.battle-after').forEach(function (el) { replay(el, 'show'); });
+  }
+
+  speedBtn.addEventListener('click', function () {
+    speed = speeds[(speeds.indexOf(speed) + 1) % speeds.length];
+    speedBtn.textContent = '×' + speed;
+    try { localStorage.setItem('battleSpeed', speed); } catch (e) {}
+  });
+  arena.querySelector('[data-skip]').addEventListener('click', finish);
+  wait(next, 700);
+})();
+</script>
 <?php
 }
 
@@ -603,14 +714,47 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
   .filters a.active { color: #1a1b26; background: var(--gold); border-color: var(--gold); font-weight: 700; }
   .filters .sep { width: 1px; height: 20px; background: var(--line); margin: 0 6px; }
 
-  /* バトル結果（ユニットのHP・戦闘ログ） */
-  .unit-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 18px 0; }
-  .unit-side.enemy { text-align: right; }
-  .unit-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin-top: 6px; }
-  .unit { position: relative; padding: 8px; background: var(--surface-2); border: 1px solid var(--line); text-align: center; }
-  .unit img { width: 100%; height: 64px; object-fit: contain; }
-  .unit.boss { border-color: rgba(255,140,140,.6); box-shadow: 0 0 14px rgba(255,90,90,.25) inset; }
+  /* 戦闘シーン（敵が上・味方が下） */
+  .arena { position: relative; overflow: hidden; margin: 18px 0; padding: 14px 12px 18px; border: 1px solid var(--line);
+           background:
+             radial-gradient(ellipse 60% 40% at 50% 0%, rgba(255,90,90,.16), transparent 70%),
+             radial-gradient(ellipse 60% 40% at 50% 100%, rgba(95,211,138,.12), transparent 70%),
+             rgba(5,7,16,.55); }
+  .arena.flash { animation: arenaFlash .5s; }
+  .battle-controls { position: absolute; top: 10px; right: 10px; z-index: 3; display: flex; gap: 6px; }
+  .battle:not(.playing) .battle-controls { display: none; }
+  .side-label { font-size: 11px; color: var(--muted); text-align: center; margin-bottom: 4px; }
+  .unit-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
+  .turn-banner { text-align: center; margin: 14px 0; font-size: 22px; font-weight: 700; color: var(--gold); text-shadow: 0 0 12px rgba(232,201,143,.6); }
+  .turn-banner.pop { animation: bannerPop .45s; }
+  .unit { position: relative; width: 116px; padding: 8px; background: var(--surface-2); border: 1px solid var(--line); text-align: center;
+          transition: transform .18s ease-out, filter .4s, box-shadow .18s; }
+  .unit img { width: 100%; height: 72px; object-fit: contain; }
+  .unit.boss { width: 160px; border-color: rgba(255,140,140,.6); box-shadow: 0 0 14px rgba(255,90,90,.25) inset; }
+  .unit.boss img { height: 100px; }
   .unit.down { filter: grayscale(1) brightness(.45); }
+  .unit.acting { z-index: 2; box-shadow: 0 0 18px rgba(232,201,143,.7); border-color: var(--gold); }
+  .unit-side.ally .unit.acting { transform: translateY(-16px) scale(1.06); }
+  .unit-side.enemy .unit.acting { transform: translateY(16px) scale(1.06); }
+  .unit.hit { animation: hitShake .35s; }
+  .unit.ko { animation: koFall .6s forwards; }
+  .unit.hit img, .unit.ko img { animation: hitFlash .35s; }
+  .dmg-pop { position: absolute; left: 50%; top: 24px; z-index: 4; pointer-events: none; white-space: nowrap;
+             font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 24px; color: #fff;
+             text-shadow: 0 0 6px rgba(255,80,80,.9), 0 2px 2px #000; animation: dmgUp .9s forwards; }
+  .dmg-pop.crit { font-size: 32px; color: #ffd88a; text-shadow: 0 0 10px rgba(255,180,60,.9), 0 2px 2px #000; }
+  .battle.playing .battle-after { display: none; }
+  .battle-after.show { animation: reveal .5s both; }
+  .battle.playing .battle-log li.pending { display: none; }
+  .battle-log li.pending { animation: none; }
+  @keyframes bannerPop { 0% { transform: scale(.6); opacity: 0; } 60% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); } }
+  @keyframes hitShake { 0%,100% { transform: translateX(0); } 20% { transform: translateX(-7px); } 40% { transform: translateX(6px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(3px); } }
+  @keyframes hitFlash { 0% { filter: brightness(2.6) saturate(0); } 100% { filter: none; } }
+  @keyframes koFall { 0% { transform: none; } 30% { transform: translateX(-6px) rotate(-3deg); } 100% { transform: translateY(6px) rotate(4deg); } }
+  @keyframes dmgUp { 0% { transform: translate(-50%, 10px) scale(.7); opacity: 0; } 20% { transform: translate(-50%, 0) scale(1.15); opacity: 1; }
+                     100% { transform: translate(-50%, -34px) scale(1); opacity: 0; } }
+  @keyframes arenaFlash { 0% { box-shadow: inset 0 0 0 0 rgba(255,90,90,0); } 30% { box-shadow: inset 0 0 80px 10px rgba(255,90,90,.55); } 100% { box-shadow: inset 0 0 0 0 rgba(255,90,90,0); } }
+  @media (max-width: 600px) { .unit { width: 84px; padding: 6px; } .unit img { height: 52px; } .unit.boss { width: 120px; } .unit.boss img { height: 72px; } }
   .unit-name { font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .unit-hp { font-family: "Rajdhani", sans-serif; font-size: 12px; color: var(--muted); }
   .hpbar { height: 5px; background: rgba(255,255,255,.12); border-radius: 3px; overflow: hidden; margin: 4px 0 2px; }
@@ -622,13 +766,12 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
   .ko-tag { border: 1px solid rgba(255,140,140,.6); color: #ffb3b3; }
   .battle-log summary { cursor: pointer; font-weight: 700; margin-bottom: 8px; }
   .battle-log ol { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font-size: 13px; }
-  .battle-log li { padding: 3px 10px; border-left: 2px solid transparent; animation: reveal .3s both; animation-delay: calc(var(--i, 0) * 45ms); }
+  .battle-log li { padding: 3px 10px; border-left: 2px solid transparent; animation: reveal .3s both; }
   .battle-log li.ally { border-left-color: #5fd38a; }
   .battle-log li.enemy { border-left-color: #ff7a7a; color: #e2dbe6; }
   .battle-log li.aoe { background: rgba(255,90,90,.10); }
   .battle-log li.turn { font-family: "Rajdhani", sans-serif; color: var(--gold); letter-spacing: .2em; margin-top: 8px; }
   .battle-log .dmg { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 15px; }
-  @media (max-width: 720px) { .unit-sides { grid-template-columns: 1fr; } .unit-side.enemy { text-align: left; } }
 
   /* クエスト */
   .chapter { margin-bottom: 30px; }

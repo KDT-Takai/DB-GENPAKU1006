@@ -5,6 +5,9 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+// MySQL（TZ=Asia/Tokyo）と時刻をそろえる。スタミナ回復の計算に使う
+date_default_timezone_set('Asia/Tokyo');
+
 function db(): PDO
 {
     static $pdo = null;
@@ -89,11 +92,213 @@ function user_gems(int $userId): int
     return (int)$stmt->fetchColumn();
 }
 
+// ---------- 育成要素（カードレベル・属性・スキル・ランク・スタミナ） ----------
+const LEVEL_RATE        = 0.06;   // カードのレベルが1上がるごとのステータス上昇率
+const STAMINA_REGEN_SEC = 60;     // スタミナが1回復するまでの秒数
+
+// 所持カードを表示・計算するときの列（ATK・HP はレベルを反映した値にする）
+const CARD_COLS = 'uc.id AS user_card_id, uc.card_id, uc.level, c.name, c.image, c.rarity, c.limit_break, c.element, c.skill,
+                   CAST(ROUND(c.attack * (1 + 0.06 * (uc.level - 1))) AS SIGNED) AS attack,
+                   CAST(ROUND(c.hp * (1 + 0.06 * (uc.level - 1))) AS SIGNED) AS hp';
+
+// 属性：[表示名, 色]。火→風→水→火 の三すくみ、光と闇はお互いに弱点
+const ELEMENTS = [
+    'fire'  => ['火', '#ff7a4a'], 'water' => ['水', '#4ab0ff'], 'wind' => ['風', '#5ee08a'],
+    'light' => ['光', '#ffe27a'], 'dark'  => ['闇', '#b67aff'], 'none' => ['無', '#a0a4b8'],
+];
+// スキル：[名前, 説明]。3ターンに1回（2・5・8ターン目）発動する
+const SKILLS = [
+    'strike' => ['渾身の一撃', '敵1体に攻撃力の220%のダメージ'],
+    'aoe'    => ['全体攻撃',   '敵全体に攻撃力の70%のダメージ'],
+    'heal'   => ['ヒール',     'HPの割合が一番低い味方を攻撃力の150%回復'],
+    'guard'  => ['守りの構え', '次のターンが終わるまで、味方全員の受けるダメージを35%軽減'],
+];
+
+function element_rate(string $attacker, string $defender): float
+{
+    $strong = ['fire' => 'wind', 'wind' => 'water', 'water' => 'fire', 'light' => 'dark', 'dark' => 'light'];
+    if (($strong[$attacker] ?? null) === $defender) return 1.3;
+    if (($strong[$defender] ?? null) === $attacker && !in_array($attacker, ['light', 'dark'], true)) return 0.8;
+    return 1.0;
+}
+
+function max_level(int $rarity, int $limitBreak): int { return 10 + $rarity * 5 + $limitBreak * 10; }
+function levelup_cost(int $level, int $rarity): int   { return 30 * $level * $rarity; }
+function stamina_max(int $rank): int                   { return min(120, 40 + $rank * 2); }
+function exp_next(int $rank): int                      { return 50 + $rank * 50; }
+
+// スタミナを経過時間ぶん回復させてから、ユーザーの状態（ランク・通貨・スタミナ）を返す
+function user_status(int $userId): array
+{
+    $stmt = db()->prepare('SELECT id, name, gems, gold, player_rank, exp, stamina, stamina_at, pity_count FROM users WHERE id = :id');
+    $stmt->execute([':id' => $userId]);
+    $u = $stmt->fetch();
+    if (!$u) {
+        return [];
+    }
+    $max = stamina_max((int)$u['player_rank']);
+    $now = time();
+    $at  = min($now, strtotime($u['stamina_at']));
+    if ((int)$u['stamina'] < $max) {
+        $gain = intdiv($now - $at, STAMINA_REGEN_SEC);
+        if ($gain > 0) {
+            $u['stamina'] = min($max, (int)$u['stamina'] + $gain);
+            $at = $u['stamina'] >= $max ? $now : $at + $gain * STAMINA_REGEN_SEC;
+            db()->prepare('UPDATE users SET stamina = :s, stamina_at = :at WHERE id = :id')
+                ->execute([':s' => $u['stamina'], ':at' => date('Y-m-d H:i:s', $at), ':id' => $userId]);
+        }
+    }
+    $u['stamina_max']  = $max;
+    $u['stamina_next'] = (int)$u['stamina'] >= $max ? 0 : STAMINA_REGEN_SEC - ($now - $at) % STAMINA_REGEN_SEC;
+    $u['exp_next']     = exp_next((int)$u['player_rank']);
+    return $u;
+}
+
+// スタミナを使う（足りなければ false）。満タンから使ったときは、そこから回復の時計を動かす
+function spend_stamina(int $userId, int $cost): bool
+{
+    $u = user_status($userId);
+    if ((int)$u['stamina'] < $cost) {
+        return false;
+    }
+    $sql = 'UPDATE users SET stamina = stamina - :cost' . ((int)$u['stamina'] >= $u['stamina_max'] ? ', stamina_at = NOW()' : '')
+         . ' WHERE id = :id AND stamina >= :cost2';
+    $stmt = db()->prepare($sql);
+    $stmt->execute([':cost' => $cost, ':cost2' => $cost, ':id' => $userId]);
+    return $stmt->rowCount() === 1;
+}
+
+// 経験値を加算し、ランクアップしたらスタミナ全回復＋ランク報酬をプレゼントボックスへ
+// 戻り値: 上がったランク数
+function gain_exp(int $userId, int $exp): int
+{
+    $stmt = db()->prepare('SELECT player_rank, exp FROM users WHERE id = :id FOR UPDATE');
+    $stmt->execute([':id' => $userId]);
+    $row  = $stmt->fetch();
+    $rank = (int)$row['player_rank'];
+    $total = (int)$row['exp'] + $exp;
+    $up = 0;
+    while ($total >= exp_next($rank)) {
+        $total -= exp_next($rank);
+        $rank++;
+        $up++;
+        send_present($userId, 'gems', 50, 'ランク' . $rank . ' 到達ボーナス');
+    }
+    if ($up) {
+        db()->prepare('UPDATE users SET player_rank = :r, exp = :e, stamina = GREATEST(stamina, :max), stamina_at = NOW() WHERE id = :id')
+            ->execute([':r' => $rank, ':e' => $total, ':max' => stamina_max($rank), ':id' => $userId]);
+    } else {
+        db()->prepare('UPDATE users SET exp = :e WHERE id = :id')->execute([':e' => $total, ':id' => $userId]);
+    }
+    return $up;
+}
+
+// ---------- プレゼントボックス・デイリーミッション ----------
+const PRESENT_ITEMS = ['gems' => '石', 'gold' => 'ゴールド', 'stamina' => 'スタミナ'];
+
+function send_present(int $userId, string $item, int $amount, string $message): void
+{
+    db()->prepare('INSERT INTO user_presents (user_id, item, amount, message) VALUES (:u, :i, :a, :m)')
+        ->execute([':u' => $userId, ':i' => $item, ':a' => $amount, ':m' => $message]);
+}
+
+// 報酬を直接付与する（ミッション・プレゼント受け取りで共通）
+function grant(int $userId, string $item, int $amount): void
+{
+    $col = ['gems' => 'gems', 'gold' => 'gold', 'stamina' => 'stamina'][$item];
+    db()->prepare("UPDATE users SET {$col} = {$col} + :a WHERE id = :id")->execute([':a' => $amount, ':id' => $userId]);
+}
+
+// 今日の行動回数を数える（デイリーミッション用）
+function count_up(int $userId, string $key, int $n = 1): void
+{
+    db()->prepare('INSERT INTO user_daily_counts (user_id, day, mkey, cnt) VALUES (:u, CURDATE(), :k, :n)
+                   ON DUPLICATE KEY UPDATE cnt = cnt + VALUES(cnt)')
+        ->execute([':u' => $userId, ':k' => $key, ':n' => $n]);
+}
+
+// [タイトル, 目標回数, 報酬の種類, 報酬量]
+const DAILY_MISSIONS = [
+    'login'   => ['ログインボーナスを受け取る', 1, 'gems', 30],
+    'gacha'   => ['ガチャを1回引く',           1, 'gold', 1000],
+    'quest'   => ['クエストを3回クリアする',     3, 'gold', 1500],
+    'battle'  => ['対戦を1回する',             1, 'gems', 30],
+    'levelup' => ['カードを強化する',           1, 'gold', 800],
+];
+const DAILY_ALL = ['デイリーミッションをすべて達成', 'gems', 100];
+// [タイトル, 何の値で判定するか, 目標, 報酬の種類, 報酬量]
+const ACHIEVEMENTS = [
+    'rank5'  => ['プレイヤーランク5に到達',      'rank',  5,  'gems', 100],
+    'rank10' => ['プレイヤーランク10に到達',     'rank',  10, 'gems', 200],
+    'rank20' => ['プレイヤーランク20に到達',     'rank',  20, 'gems', 300],
+    'book5'  => ['カードを5シリーズ集める',      'book',  5,  'gems', 100],
+    'book10' => ['全10シリーズのカードを集める', 'book',  10, 'gems', 300],
+    'star12' => ['クエストの★を12個集める',      'stars', 12, 'gems', 100],
+    'star36' => ['クエストの★をすべて集める',    'stars', 36, 'gems', 300],
+    'win5'   => ['対戦で5回勝つ',               'wins',  5,  'gold', 3000],
+    'win20'  => ['対戦で20回勝つ',              'wins',  20, 'gems', 200],
+    'lv30'   => ['カードをレベル30まで育てる',   'maxlv', 30, 'gold', 5000],
+];
+
+// ミッションの進み具合と受け取り状況。claimable は受け取れる報酬の数
+function mission_status(int $userId): array
+{
+    $pdo = db();
+    $stmt = $pdo->prepare('SELECT mkey, cnt FROM user_daily_counts WHERE user_id = :u AND day = CURDATE()');
+    $stmt->execute([':u' => $userId]);
+    $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+
+    $stmt = $pdo->prepare("SELECT mission FROM user_mission_claims WHERE user_id = :u AND (period = :today OR period = 'once')");
+    $stmt->execute([':u' => $userId, ':today' => date('Y-m-d')]);
+    $claimed = array_flip($stmt->fetchAll(PDO::FETCH_COLUMN));
+
+    $stmt = $pdo->prepare(
+        "SELECT u.player_rank AS `rank`,
+                (SELECT COUNT(DISTINCT c.image) FROM user_cards uc JOIN cards c ON c.id = uc.card_id WHERE uc.user_id = u.id) AS book,
+                (SELECT COALESCE(SUM(best_stars), 0) FROM user_stage_progress WHERE user_id = u.id) AS stars,
+                (SELECT COUNT(*) FROM battle_histories WHERE user_id = u.id AND result = 'win') AS wins,
+                (SELECT COALESCE(MAX(level), 1) FROM user_cards WHERE user_id = u.id) AS maxlv
+           FROM users u WHERE u.id = :u"
+    );
+    $stmt->execute([':u' => $userId]);
+    $values = $stmt->fetch();
+
+    $daily = [];
+    $done = 0;
+    foreach (DAILY_MISSIONS as $key => [$title, $goal, $item, $amount]) {
+        $now = min($goal, (int)($counts[$key] ?? 0));
+        $daily[$key] = compact('title', 'goal', 'item', 'amount', 'now') + ['claimed' => isset($claimed[$key])];
+        if (isset($claimed[$key])) $done++;
+    }
+    [$title, $item, $amount] = DAILY_ALL;
+    $daily['all'] = ['title' => $title, 'goal' => count(DAILY_MISSIONS), 'item' => $item, 'amount' => $amount,
+                     'now' => $done, 'claimed' => isset($claimed['all'])];
+
+    $achievements = [];
+    foreach (ACHIEVEMENTS as $key => [$title, $by, $goal, $item, $amount]) {
+        $now = min($goal, (int)$values[$by]);
+        $achievements[$key] = compact('title', 'goal', 'item', 'amount', 'now') + ['claimed' => isset($claimed[$key])];
+    }
+
+    $claimable = 0;
+    foreach ($daily + $achievements as $m) {
+        if (!$m['claimed'] && $m['now'] >= $m['goal']) $claimable++;
+    }
+    return ['daily' => $daily, 'achievements' => $achievements, 'claimable' => $claimable];
+}
+
+function present_count(int $userId): int
+{
+    $stmt = db()->prepare('SELECT COUNT(*) FROM user_presents WHERE user_id = :u AND received_at IS NULL');
+    $stmt->execute([':u' => $userId]);
+    return (int)$stmt->fetchColumn();
+}
+
 // チーム編成（slot => カード情報）
 function team_cards(int $userId): array
 {
     $stmt = db()->prepare(
-        'SELECT t.slot, uc.id AS user_card_id, uc.card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp
+        'SELECT t.slot, ' . CARD_COLS . '
            FROM user_team_cards t
            JOIN user_cards uc ON uc.id = t.user_card_id
            JOIN cards c ON c.id = uc.card_id
@@ -129,7 +334,8 @@ function card_units(array $team): array
     $units = [];
     foreach ($team as $c) {
         $units[] = ['name' => $c['name'], 'image' => $c['image'], 'attack' => (int)$c['attack'],
-                    'hp' => (int)$c['hp'], 'max_hp' => (int)$c['hp'], 'boss' => false];
+                    'hp' => (int)$c['hp'], 'max_hp' => (int)$c['hp'], 'boss' => false,
+                    'element' => $c['element'] ?? 'none', 'skill' => $c['skill'] ?? null];
     }
     return $units;
 }
@@ -137,7 +343,8 @@ function card_units(array $team): array
 /**
  * 味方 → 敵 の順に1体ずつ攻撃するターン制バトル
  * - 攻撃する相手は、生き残っている相手からランダム
- * - ダメージは ATK の 85〜115%。15% の確率で会心（1.5倍）
+ * - ダメージは ATK の 85〜115%。15% の確率で会心（1.5倍）。属性が有利なら1.3倍、不利なら0.8倍
+ * - カードは3ターンに1回（2・5・8ターン目）スキルを使う（SKILLS を参照）
  * - ボスは3ターンごとに全体攻撃（全員に ATK の 60%）
  * - BATTLE_MAX_TURNS ターンで敵を全滅できなければ時間切れで敗北
  * 戻り値: result（win/lose）, turns, ko（倒された味方の数）, allies, enemies（戦闘後のHP）, log
@@ -146,32 +353,62 @@ function simulate_battle(array $allies, array $enemies): array
 {
     $units = ['ally' => array_values($allies), 'enemy' => array_values($enemies)];
     $log   = [];
+    $guard = ['ally' => 0, 'enemy' => 0];   // このターンまで被ダメージ軽減
     $alive = function (string $side) use (&$units): array {
         return array_keys(array_filter($units[$side], fn($u) => $u['hp'] > 0));
     };
 
-    $hit = function (string $side, int $i, int $t, float $rate, array $tags) use (&$units, &$log, &$turn): void {
+    $hit = function (string $side, int $i, int $t, float $rate, array $tags, ?string $skill = null) use (&$units, &$log, &$turn, &$guard): void {
         $foe    = $side === 'ally' ? 'enemy' : 'ally';
         $crit   = random_int(1, 100) <= 15;
-        $damage = (int)round($units[$side][$i]['attack'] * $rate * random_int(85, 115) / 100 * ($crit ? 1.5 : 1));
+        $elem   = element_rate($units[$side][$i]['element'] ?? 'none', $units[$foe][$t]['element'] ?? 'none');
+        $damage = $units[$side][$i]['attack'] * $rate * random_int(85, 115) / 100 * ($crit ? 1.5 : 1) * $elem;
+        if ($guard[$foe] >= $turn) {
+            $damage *= 0.65;
+            $tags[] = 'guarded';
+        }
+        $damage = (int)round($damage);
         $units[$foe][$t]['hp'] = max(0, $units[$foe][$t]['hp'] - $damage);
         $ko = $units[$foe][$t]['hp'] === 0;
-        if ($crit) $tags[] = 'crit';
-        if ($ko)   $tags[] = 'ko';
-        // a / t：攻撃した側・された側のユニット番号、hp：攻撃を受けた後の残りHP（戦闘シーンの再生に使う）
-        $log[] = ['turn' => $turn, 'side' => $side, 'tags' => $tags, 'a' => $i, 't' => $t, 'hp' => $units[$foe][$t]['hp'],
-                  'actor' => $units[$side][$i]['name'], 'target' => $units[$foe][$t]['name'], 'damage' => $damage];
+        if ($crit)       $tags[] = 'crit';
+        if ($elem > 1)   $tags[] = 'weak';
+        if ($elem < 1)   $tags[] = 'resist';
+        if ($ko)         $tags[] = 'ko';
+        // a / t：攻撃した側・された側のユニット番号、ts：された側、hp：攻撃を受けた後の残りHP（戦闘シーンの再生に使う）
+        $log[] = ['turn' => $turn, 'side' => $side, 'tags' => $tags, 'a' => $i, 't' => $t, 'ts' => $foe, 'hp' => $units[$foe][$t]['hp'],
+                  'actor' => $units[$side][$i]['name'], 'target' => $units[$foe][$t]['name'], 'damage' => $damage, 'skill' => $skill];
     };
 
     $result = 'lose';
     for ($turn = 1; $turn <= BATTLE_MAX_TURNS; $turn++) {
         foreach (['ally' => 'enemy', 'enemy' => 'ally'] as $side => $foe) {
             foreach (array_keys($units[$side]) as $i) {
-                if ($units[$side][$i]['hp'] <= 0) continue;
+                $u = $units[$side][$i];
+                if ($u['hp'] <= 0) continue;
                 $targets = $alive($foe);
                 if (!$targets) break 2;
-                if (!empty($units[$side][$i]['boss']) && $turn % 3 === 0) {
+                $skill = empty($u['boss']) && !empty($u['skill']) && $turn % 3 === 2 ? $u['skill'] : null;
+                $name  = $skill ? SKILLS[$skill][0] : null;
+                if (!empty($u['boss']) && $turn % 3 === 0) {
                     foreach ($targets as $t) $hit($side, $i, $t, 0.6, ['aoe']);
+                } elseif ($skill === 'strike') {
+                    $hit($side, $i, $targets[array_rand($targets)], 2.2, ['skill'], $name);
+                } elseif ($skill === 'aoe') {
+                    foreach ($targets as $t) $hit($side, $i, $t, 0.7, ['skill', 'aoe'], $name);
+                } elseif ($skill === 'heal') {
+                    // HPの割合が一番低い味方を回復
+                    $mates = $alive($side);
+                    usort($mates, fn($a, $b) => $units[$side][$a]['hp'] / $units[$side][$a]['max_hp'] <=> $units[$side][$b]['hp'] / $units[$side][$b]['max_hp']);
+                    $t = $mates[0];
+                    $amount = min((int)round($u['attack'] * 1.5), $units[$side][$t]['max_hp'] - $units[$side][$t]['hp']);
+                    $units[$side][$t]['hp'] += $amount;
+                    $log[] = ['turn' => $turn, 'side' => $side, 'tags' => ['skill', 'heal'], 'a' => $i, 't' => $t, 'ts' => $side,
+                              'hp' => $units[$side][$t]['hp'], 'actor' => $u['name'], 'target' => $units[$side][$t]['name'],
+                              'damage' => $amount, 'skill' => $name];
+                } elseif ($skill === 'guard') {
+                    $guard[$side] = $turn + 1;
+                    $log[] = ['turn' => $turn, 'side' => $side, 'tags' => ['skill', 'guard'], 'a' => $i, 't' => $i, 'ts' => $side,
+                              'hp' => $u['hp'], 'actor' => $u['name'], 'target' => $u['name'], 'damage' => 0, 'skill' => $name];
                 } else {
                     $hit($side, $i, $targets[array_rand($targets)], 1.0, []);
                 }
@@ -207,7 +444,7 @@ function render_battle(array $battle, string $allyLabel, string $enemyLabel): vo
 <?php foreach ($units as $u): $rate = $u['max_hp'] > 0 ? $u['hp'] / $u['max_hp'] * 100 : 0; ?>
       <div class="unit<?= $u['hp'] <= 0 ? ' down' : '' ?><?= !empty($u['boss']) ? ' boss' : '' ?>" data-max="<?= h($u['max_hp']) ?>" data-final="<?= h($u['hp']) ?>">
         <?php if ($u['image'] !== ''): ?><img src="resource/cards/<?= h($u['image']) ?>" alt=""><?php endif; ?>
-        <div class="unit-name"><?= !empty($u['boss']) ? '<span class="boss-tag">BOSS</span>' : '' ?><?= h($u['name']) ?></div>
+        <div class="unit-name"><?= element_chip($u['element'] ?? 'none') ?><?= !empty($u['boss']) ? '<span class="boss-tag">BOSS</span>' : '' ?><?= h($u['name']) ?></div>
         <div class="hpbar"><i style="width:<?= round($rate, 1) ?>%"></i></div>
         <div class="unit-hp"><?= number_format($u['hp']) ?> / <?= number_format($u['max_hp']) ?></div>
       </div>
@@ -222,7 +459,7 @@ function render_battle(array $battle, string $allyLabel, string $enemyLabel): vo
       <button type="button" class="mini" data-skip>スキップ</button>
     </div>
 <?php $side($battle['enemies'], $enemyLabel, 'enemy'); ?>
-    <div class="turn-banner en">BATTLE</div>
+    <div class="turn-banner">バトル開始</div>
 <?php $side($battle['allies'], $allyLabel, 'ally'); ?>
   </div>
   <details class="battle-log" open>
@@ -230,12 +467,20 @@ function render_battle(array $battle, string $allyLabel, string $enemyLabel): vo
     <ol>
 <?php $prevTurn = 0; foreach ($battle['log'] as $n => $l): ?>
 <?php if ($l['turn'] !== $prevTurn): $prevTurn = $l['turn']; ?>
-      <li class="turn" data-turn="<?= h($l['turn']) ?>">TURN <?= h($l['turn']) ?></li>
+      <li class="turn" data-turn="<?= h($l['turn']) ?>">ターン <?= h($l['turn']) ?></li>
 <?php endif; ?>
       <li class="<?= h($l['side']) ?> <?= h(implode(' ', $l['tags'])) ?>" data-n="<?= $n ?>">
-        <b><?= h($l['actor']) ?></b><?= in_array('aoe', $l['tags'], true) ? ' の全体攻撃！' : ' の攻撃' ?>
-        → <?= h($l['target']) ?> に <span class="dmg"><?= number_format($l['damage']) ?></span><?= in_array('crit', $l['tags'], true) ? ' <span class="crit-tag">会心！</span>' : '' ?>
-        <?= in_array('ko', $l['tags'], true) ? '<span class="ko-tag">' . h($l['target']) . ' は倒れた</span>' : '' ?>
+<?php $tags = $l['tags']; $skill = $l['skill'] ?? null; ?>
+<?php if (in_array('heal', $tags, true)): ?>
+        <b><?= h($l['actor']) ?></b> の<span class="skill-tag"><?= h($skill) ?></span> → <?= h($l['target']) ?> のHPが <span class="heal-num"><?= number_format($l['damage']) ?></span> 回復
+<?php elseif (in_array('guard', $tags, true)): ?>
+        <b><?= h($l['actor']) ?></b> の<span class="skill-tag"><?= h($skill) ?></span> 味方全員の守りが固くなった
+<?php else: ?>
+        <b><?= h($l['actor']) ?></b><?= $skill ? ' の<span class="skill-tag">' . h($skill) . '</span>' : (in_array('aoe', $tags, true) ? ' の全体攻撃！' : ' の攻撃') ?>
+        → <?= h($l['target']) ?> に <span class="dmg"><?= number_format($l['damage']) ?></span><?= in_array('crit', $tags, true) ? ' <span class="crit-tag">会心！</span>' : '' ?>
+        <?= in_array('weak', $tags, true) ? '<span class="weak-tag">弱点！</span>' : '' ?><?= in_array('resist', $tags, true) ? '<span class="resist-tag">いまひとつ</span>' : '' ?><?= in_array('guarded', $tags, true) ? '<span class="resist-tag">軽減</span>' : '' ?>
+        <?= in_array('ko', $tags, true) ? '<span class="ko-tag">' . h($l['target']) . ' は倒れた</span>' : '' ?>
+<?php endif; ?>
       </li>
 <?php endforeach; ?>
 <?php if ($battle['timeout']): ?>
@@ -269,8 +514,10 @@ function render_battle(array $battle, string $allyLabel, string $enemyLabel): vo
   function replay(el, cls) { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); }
   function popDamage(u, e) {
     var pop = document.createElement('span');
-    pop.className = 'dmg-pop' + (e.tags.indexOf('crit') >= 0 ? ' crit' : '');
-    pop.textContent = (e.tags.indexOf('crit') >= 0 ? '会心 ' : '') + e.damage.toLocaleString();
+    var has = function (t) { return e.tags.indexOf(t) >= 0; };
+    pop.className = 'dmg-pop' + (has('crit') ? ' crit' : '') + (has('heal') ? ' heal' : '') + (has('guard') ? ' guard' : '') + (has('weak') ? ' weak' : '');
+    pop.textContent = has('heal') ? '+' + e.damage.toLocaleString() : has('guard') ? 'GUARD' :
+      (has('crit') ? '会心 ' : '') + (has('weak') ? '弱点 ' : '') + e.damage.toLocaleString();
     u.appendChild(pop);
     setTimeout(function () { pop.remove(); }, 900);
   }
@@ -299,27 +546,29 @@ function render_battle(array $battle, string $allyLabel, string $enemyLabel): vo
     var actor = units[e0.side][e0.a];
     if (e0.turn !== turn) {
       turn = e0.turn;
-      banner.textContent = 'TURN ' + turn;
+      banner.textContent = 'ターン ' + turn;
       replay(banner, 'pop');
       show(root.querySelector('.battle-log li[data-turn="' + turn + '"]'));
     }
     actor.classList.add('acting');
     var aoe = e0.tags.indexOf('aoe') >= 0;
-    if (aoe) { banner.textContent = '全体攻撃！'; replay(banner, 'pop'); replay(arena, 'flash'); }
+    var big = aoe || !!e0.skill;
+    if (big) { banner.textContent = e0.skill ? e0.skill + '！' : '全体攻撃！'; replay(banner, 'pop'); if (aoe) replay(arena, 'flash'); }
     wait(function () {
       step.forEach(function (e) {
-        var target = units[foe][e.t];
+        var target = units[e.ts || foe][e.t];
         setHp(target, e.hp);
-        replay(target, e.hp <= 0 ? 'ko' : 'hit');
+        var support = e.tags.indexOf('heal') >= 0 || e.tags.indexOf('guard') >= 0;
+        replay(target, support ? 'buff' : e.hp <= 0 ? 'ko' : 'hit');
         popDamage(target, e);
         show(root.querySelector('.battle-log li[data-n="' + e.n + '"]'));
       });
       wait(function () {
         actor.classList.remove('acting');
-        if (aoe) banner.textContent = 'TURN ' + turn;
+        if (big) banner.textContent = 'ターン ' + turn;
         wait(next, 160);
-      }, aoe ? 600 : 380);
-    }, aoe ? 500 : 260);
+      }, big ? 600 : 380);
+    }, big ? 500 : 260);
   }
 
   function finish() {
@@ -328,7 +577,7 @@ function render_battle(array $battle, string $allyLabel, string $enemyLabel): vo
     clearTimeout(timer);
     ['ally', 'enemy'].forEach(function (s) { units[s].forEach(function (u) { u.classList.remove('acting'); setHp(u, +u.dataset.final); }); });
     items.forEach(show);
-    banner.textContent = 'FINISH';
+    banner.textContent = '決着！';
     replay(banner, 'pop');
     root.classList.remove('playing');
     root.querySelectorAll('.battle-after').forEach(function (el) { replay(el, 'show'); });
@@ -344,6 +593,13 @@ function render_battle(array $battle, string $allyLabel, string $enemyLabel): vo
 })();
 </script>
 <?php
+}
+
+// 属性マーク（丸に一文字）
+function element_chip(string $element): string
+{
+    [$label, $color] = ELEMENTS[$element] ?? ELEMENTS['none'];
+    return '<span class="elem" style="--ec:' . h($color) . '" title="' . h($label) . '属性">' . h($label) . '</span>';
 }
 
 /**
@@ -368,7 +624,7 @@ function render_card(array $c, array $opts = []): void
     };
 
     ob_start(); ?>
-  <div class="card-band"><span class="stars"><?= stars((int)$c['rarity']) ?></span><?php if (isset($c['user_card_id'])): ?><span class="uid">#<?= h($c['user_card_id']) ?></span><?php endif; ?></div>
+  <div class="card-band"><span class="stars"><?= stars((int)$c['rarity']) ?></span><?php if (isset($c['element'])): ?><?= element_chip($c['element']) ?><?php endif; ?><?php if (isset($c['level'])): ?><span class="lv">Lv.<b><?= h($c['level']) ?></b></span><?php elseif (isset($c['user_card_id'])): ?><span class="uid">#<?= h($c['user_card_id']) ?></span><?php endif; ?></div>
 <?php if (!empty($c['image'])): ?>
   <img class="card-art" src="resource/cards/<?= h($c['image']) ?>" alt="" loading="lazy">
 <?php else: ?>
@@ -380,6 +636,9 @@ function render_card(array $c, array $opts = []): void
   <div class="card-body">
     <div class="card-name"><?= h($c['name']) ?></div>
     <div class="lb">限界突破 <?= str_repeat('<i class="on"></i>', (int)$c['limit_break']) ?><?= str_repeat('<i></i>', max(0, 2 - (int)$c['limit_break'])) ?></div>
+<?php if (!empty($c['skill']) && isset(SKILLS[$c['skill']])): ?>
+    <div class="skill-line" title="<?= h(SKILLS[$c['skill']][1]) ?>">SKILL <?= h(SKILLS[$c['skill']][0]) ?></div>
+<?php endif; ?>
     <dl class="stats">
       <div><dt>ATK</dt><dd><?= h($c['attack']) ?><?= $diff('attack') ?></dd></div>
       <div><dt>HP</dt><dd><?= h($c['hp']) ?><?= $diff('hp') ?></dd></div>
@@ -409,8 +668,9 @@ function render_card(array $c, array $opts = []): void
 function render_header(string $title, int $step = 0, string $lead = ''): void
 {
     $steps = ['強化するカードを選ぶ', '素材を選ぶ', '強化結果'];
-    $user  = current_user();
-    $gems  = $user ? user_gems($user['id']) : 0;
+    $user   = current_user();
+    $status = $user ? user_status($user['id']) : [];
+    $badges = $user ? ['mission.php' => mission_status($user['id'])['claimable'], 'present.php' => present_count($user['id'])] : [];
 
     // ナビゲーション（ファイル名の先頭が一致したら選択中）
     $nav = [
@@ -422,6 +682,8 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
         'quest.php'          => ['クエスト', 'quest'],
         'battle.php'         => ['対戦', 'battle'],
         'ranking.php'        => ['ランキング', 'ranking'],
+        'mission.php'        => ['ミッション', 'mission'],
+        'present.php'        => ['プレゼント', 'present'],
     ];
     $script = basename($_SERVER['SCRIPT_NAME'] ?? '');
     ?>
@@ -432,385 +694,441 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= h($title) ?> | STAR CARDS</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&family=Rajdhani:wght@600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=M+PLUS+Rounded+1c:wght@500;700;800&display=swap" rel="stylesheet">
 <style>
-  /* 崩壊：スターレイル風テーマ（宇宙・金アクセント・レア度グラデーション） */
+  /* ステッカー風テーマ：生成り色の紙・黒いインクの太線・ずらした影・はっきりした色 */
   :root {
-    --bg: #0a0d1a; --surface: rgba(22, 27, 52, .72); --surface-2: rgba(255,255,255,.04);
-    --text: #ecebf3; --muted: #9da3bd; --line: rgba(255,255,255,.10);
-    --gold: #e8c98f; --gold-deep: #b8925a; --primary: var(--gold); --primary-soft: rgba(232,201,143,.12);
-    --danger: #ff8a8a; --danger-soft: rgba(255,90,90,.12); --ok: #9fe0b5; --ok-soft: rgba(110,210,150,.12);
-    --r1: #7d6a5c; --r2: #4f9a7a; --r3: #4d7fd1; --r4: #a273e0; --r5: #e2b467;
-    --r1-d: #2e2620; --r2-d: #173a2e; --r3-d: #172a52; --r4-d: #2e1b52; --r5-d: #5a3b16;
+    --paper: #f4ecdc; --paper-2: #fffaf0; --ink: #1d1a22; --ink-soft: #4a4552;
+    --tomato: #ff5b3a; --sun: #ffc22e; --mint: #23c49a; --sky: #3d9bff; --grape: #8b67ff; --rose: #ff7aa8;
+    /* 旧テーマの変数名も残す（各ページのインラインスタイルが参照している） */
+    --text: var(--ink); --muted: #7a7266; --line: var(--ink); --surface: var(--paper-2); --surface-2: #fff;
+    --gold: #e0a100; --gold-deep: #b37d00; --primary: var(--tomato); --primary-soft: #ffe3c2;
+    --danger: #d8361b; --ok: #13936f;
+    --r3: var(--sky); --r4: var(--grape); --r5: var(--sun);
+    --shadow: 4px 4px 0 var(--ink); --shadow-sm: 2px 2px 0 var(--ink);
+    --round: "M PLUS Rounded 1c", "Hiragino Maru Gothic ProN", "Yu Gothic UI", sans-serif;
+    --display: "Dela Gothic One", "M PLUS Rounded 1c", sans-serif;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; color: var(--text); font-size: 15px; line-height: 1.65; letter-spacing: .02em; min-height: 100vh;
-         font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif;
-         background:
-           radial-gradient(1px 1px at 12% 18%, rgba(255,255,255,.8), transparent 60%),
-           radial-gradient(1px 1px at 72% 12%, rgba(255,255,255,.7), transparent 60%),
-           radial-gradient(1.5px 1.5px at 38% 64%, rgba(255,255,255,.6), transparent 60%),
-           radial-gradient(1px 1px at 88% 48%, rgba(255,255,255,.7), transparent 60%),
-           radial-gradient(1px 1px at 22% 86%, rgba(255,255,255,.5), transparent 60%),
-           radial-gradient(1.5px 1.5px at 58% 32%, rgba(255,240,210,.7), transparent 60%),
-           radial-gradient(1px 1px at 94% 82%, rgba(255,255,255,.6), transparent 60%),
-           radial-gradient(1px 1px at 6% 52%, rgba(255,255,255,.5), transparent 60%),
-           radial-gradient(ellipse 70% 50% at 85% 0%, rgba(120, 90, 200, .28), transparent 70%),
-           radial-gradient(ellipse 60% 50% at 0% 100%, rgba(60, 120, 200, .22), transparent 70%),
-           linear-gradient(180deg, #0d1124 0%, #0a0d1a 60%, #080a14 100%);
-         background-attachment: fixed; }
-  a { color: var(--gold); }
-  .en { font-family: "Rajdhani", "Noto Sans JP", sans-serif; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
+  body { margin: 0; color: var(--ink); font-family: var(--round); font-weight: 500; font-size: 15px; line-height: 1.7; min-height: 100vh;
+         background-color: var(--paper);
+         background-image: radial-gradient(rgba(29,26,34,.09) 1px, transparent 1.2px);
+         background-size: 14px 14px; }
+  a { color: var(--ink); }
+  .en { display: none; }   /* 英語の飾りラベルは使わない */
+  b, strong { font-weight: 800; }
 
-  /* ヘッダー */
-  .appbar { padding: 14px 16px; border-bottom: 1px solid var(--line);
-            background: linear-gradient(180deg, rgba(10,13,26,.92), rgba(10,13,26,.6)); backdrop-filter: blur(8px);
-            position: sticky; top: 0; z-index: 10; }
-  .appbar::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
-                   background: linear-gradient(90deg, transparent, var(--gold), transparent); opacity: .6; }
-  .appbar-inner { max-width: 1000px; margin: 0 auto; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-  .appbar .brand { display: flex; align-items: center; gap: 10px; margin-right: auto; color: var(--text); text-decoration: none;
-                   font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 20px; letter-spacing: .2em; }
-  .appbar .brand::before { content: ""; width: 12px; height: 12px; transform: rotate(45deg); border: 2px solid var(--gold);
-                           box-shadow: 0 0 10px rgba(232,201,143,.6); }
-  .appbar .who { font-size: 13px; color: var(--muted); }
-  .appbar .who strong { color: var(--text); }
+  /* ===== ヘッダー ===== */
+  .appbar { position: sticky; top: 0; z-index: 10; background: var(--ink); color: var(--paper); padding: 10px 16px 0; border-bottom: 3px solid var(--ink); }
+  .appbar-inner { max-width: 1040px; margin: 0 auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .appbar .brand { margin-right: auto; text-decoration: none; font-family: var(--display); font-size: 22px; letter-spacing: .04em; color: var(--ink);
+                   background: var(--sun); padding: 0 12px; border: 2.5px solid var(--paper); border-radius: 10px; transform: rotate(-2deg); box-shadow: 3px 3px 0 var(--tomato); }
+  .appbar .who { font-size: 13px; color: #cfc6b4; }
+  .appbar .who strong { color: var(--paper); }
   .appbar form { margin: 0; }
-  .appbar a.plain, .appbar button { color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 999px;
-       padding: 5px 14px; font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; transition: border-color .15s, background .15s; }
-  .appbar a.plain:hover, .appbar button:hover { border-color: var(--gold); background: var(--primary-soft); }
+  .appbar a.plain, .appbar button { color: var(--paper); background: transparent; border: 2px solid #5a5462; border-radius: 999px;
+       padding: 2px 12px; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; text-decoration: none; }
+  .appbar a.plain:hover, .appbar button:hover { border-color: var(--sun); color: var(--sun); }
+  .gnav { max-width: 1040px; margin: 10px auto 0; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  .gnav::-webkit-scrollbar { display: none; }
+  .gnav a { position: relative; flex: none; color: #cfc6b4; text-decoration: none; padding: 6px 14px 8px; font-size: 14px; font-weight: 800; border-radius: 10px 10px 0 0; }
+  .gnav a:hover { color: var(--paper); }
+  .gnav a.active { color: var(--ink); background: var(--paper); }
+  .gnav .dot { position: absolute; top: 0; right: 0; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--tomato); color: #fff;
+               font-size: 11px; line-height: 16px; text-align: center; border: 1.5px solid var(--ink); }
 
-  main { max-width: 1000px; margin: 0 auto; padding: 28px 16px 56px; }
-  h1 { font-size: 26px; font-weight: 700; margin: 0 0 6px; display: flex; align-items: center; gap: 12px; }
-  h1::before { content: ""; width: 4px; height: 26px; background: linear-gradient(180deg, var(--gold), transparent); }
-  .lead { color: var(--muted); margin: 0 0 24px; padding-left: 16px; }
-  h2 { font-size: 16px; margin: 0 0 12px; letter-spacing: .08em; }
+  /* ステータス（ランク・スタミナ・通貨） */
+  .status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .status .rank, .status .stamina { position: relative; display: inline-flex; align-items: baseline; gap: 5px; padding: 0 10px 6px; border-radius: 8px; background: #2c2832; }
+  .status small { font-size: 11px; color: #cfc6b4; }
+  .status .rank small::before { content: "ランク"; } .status .stamina small::before { content: "スタミナ"; }
+  .status small.en { display: inline; font-size: 0; }
+  .status small.en::before { font-size: 11px; }
+  .status b { font-family: var(--display); font-weight: 400; font-size: 17px; color: var(--paper); }
+  .status .bar { position: absolute; left: 8px; right: 8px; bottom: 3px; height: 3px; border-radius: 2px; background: #4a4552; overflow: hidden; }
+  .status .bar i { display: block; height: 100%; background: var(--sun); }
+  .status .stamina .bar i { background: var(--mint); }
+  .status .stamina em { font-style: normal; font-size: 11px; color: var(--mint); min-width: 2.4em; }
+  .gems, .coin { display: inline-flex; align-items: center; gap: 6px; padding: 1px 12px 1px 6px; border-radius: 999px; font-family: var(--display); font-weight: 400; font-size: 14px;
+                 background: var(--paper-2); color: var(--ink); border: 2px solid var(--ink); }
+  .appbar .gems, .appbar .coin { border-color: var(--paper); }
+  .gem-icon { display: inline-block; width: 13px; height: 13px; transform: rotate(45deg); flex: none; background: var(--sky); border: 2px solid var(--ink); border-radius: 2px; }
+  .gold-icon { display: inline-block; width: 15px; height: 15px; border-radius: 50%; flex: none; background: var(--sun); border: 2px solid var(--ink); box-shadow: inset -2px -2px 0 #e09a00; }
+  .stamina-icon { display: inline-block; width: 13px; height: 13px; border-radius: 3px; transform: rotate(45deg); background: var(--mint); border: 2px solid var(--ink); }
 
-  /* ステップ表示（ひし形のノード） */
-  .steps { display: flex; list-style: none; padding: 0; margin: 0 0 28px; counter-reset: step; }
-  .steps li { flex: 1; position: relative; text-align: center; font-size: 12px; color: var(--muted); padding-top: 34px; }
-  .steps li::before { counter-increment: step; content: counter(step); position: absolute; top: 4px; left: 50%; z-index: 1;
-        width: 20px; height: 20px; line-height: 20px; transform: translateX(-50%) rotate(45deg); background: #141936;
-        border: 1px solid rgba(255,255,255,.25); font-size: 0; }
-  .steps li:not(:first-child)::after { content: ""; position: absolute; top: 14px; right: 50%; width: 100%; height: 1px; background: rgba(255,255,255,.18); }
-  .steps li.done::before { background: var(--gold-deep); border-color: var(--gold); }
-  .steps li.current::before { background: var(--gold); border-color: #fff3d8; box-shadow: 0 0 14px rgba(232,201,143,.8); }
-  .steps li.done::after, .steps li.current::after { background: linear-gradient(90deg, var(--gold-deep), var(--gold)); height: 2px; }
-  .steps li.current { color: var(--gold); font-weight: 700; }
+  /* ===== ページ ===== */
+  main { max-width: 1040px; margin: 0 auto; padding: 26px 16px 64px; }
+  h1 { font-family: var(--display); font-weight: 400; font-size: 30px; line-height: 1.2; margin: 0 0 18px; display: inline-block; position: relative; }
+  h1::after { content: ""; position: absolute; left: -4px; right: -8px; bottom: 2px; height: 12px; background: var(--sun); z-index: -1; transform: skewX(-12deg); }
+  .lead { color: var(--ink-soft); margin: -8px 0 22px; font-size: 14px; }
+  h2 { font-family: var(--display); font-weight: 400; font-size: 18px; margin: 0 0 12px; }
 
-  /* 汎用パーツ */
-  .panel { position: relative; background: var(--surface); border: 1px solid var(--line); padding: 24px; margin-bottom: 24px;
-           backdrop-filter: blur(6px);
-           clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 18px 100%, 0 calc(100% - 18px)); }
-  .notice { padding: 12px 16px; margin: 0 0 20px; background: var(--primary-soft); border-left: 3px solid var(--gold); color: var(--text); }
-  .notice-error { background: var(--danger-soft); border-left-color: var(--danger); color: #ffd2d2; }
-  .notice-ok { background: var(--ok-soft); border-left-color: var(--ok); color: #d6f5e1; }
-  .btn { display: inline-flex; align-items: center; gap: 10px; background: linear-gradient(180deg, #f7f3ea, #dcd5c6); color: #1a1b26;
-         border: 0; border-radius: 999px; padding: 9px 22px 9px 10px; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer;
-         box-shadow: 0 2px 10px rgba(0,0,0,.35); transition: transform .12s, box-shadow .12s; }
-  .btn::before { content: ""; width: 18px; height: 18px; border-radius: 50%; background: #1a1b26;
-                 box-shadow: inset 0 0 0 5px #dcd5c6, inset 0 0 0 7px #1a1b26; flex: none; }
-  .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 18px rgba(232,201,143,.35); }
-  .btn-ghost { background: rgba(255,255,255,.04); color: var(--text); border: 1px solid rgba(255,255,255,.28); box-shadow: none; }
-  .btn-ghost::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
-  .btn-ghost:hover { border-color: var(--gold); box-shadow: none; }
-  .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+  .panel { position: relative; background: var(--paper-2); border: 2.5px solid var(--ink); border-radius: 16px; padding: 20px; margin-bottom: 24px; box-shadow: var(--shadow); }
+  .notice { padding: 10px 16px; margin: 0 0 20px; background: #fff3c4; border: 2.5px solid var(--ink); border-radius: 12px; font-weight: 700; box-shadow: var(--shadow-sm); }
+  .notice-error { background: #ffd2c7; }
+  .notice-ok { background: #c9f2df; }
   .muted { color: var(--muted); font-size: 13px; }
-  input[type=text] { font: inherit; color: var(--text); padding: 9px 16px; background: rgba(0,0,0,.3); border: 1px solid var(--line);
-                     border-radius: 999px; min-width: 0; flex: 1; max-width: 340px; outline: none; }
-  input[type=text]:focus { border-color: var(--gold); }
-  input[type=text]::placeholder { color: #6f7590; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
 
-  /* カードのグループ */
-  .group { margin-bottom: 34px; }
-  .group-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; padding-bottom: 8px;
-                border-bottom: 1px solid var(--line); }
-  .group-head h2 { margin: 0; font-size: 18px; }
-  .group-head .count { color: var(--gold); font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 18px; }
-  .group-head .to { color: var(--muted); font-size: 13px; margin-left: auto; }
+  /* ボタン：押すと影の分だけ沈む */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 20px; font: inherit; font-weight: 800; font-size: 15px;
+         color: var(--ink); background: var(--sun); border: 2.5px solid var(--ink); border-radius: 12px; box-shadow: var(--shadow);
+         text-decoration: none; cursor: pointer; transition: transform .08s, box-shadow .08s; }
+  .btn:hover { background: #ffd04f; }
+  .btn:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 var(--ink); }
+  .btn-ghost { background: var(--paper-2); }
+  .btn-ghost:hover { background: #fff; }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; transform: none; box-shadow: var(--shadow-sm); }
+  .mini { display: inline-block; font: inherit; font-size: 12px; font-weight: 700; color: var(--ink); background: var(--paper-2); border: 2px solid var(--ink);
+          border-radius: 999px; padding: 1px 12px; cursor: pointer; text-decoration: none; box-shadow: var(--shadow-sm); }
+  .mini:hover { background: var(--sun); }
+  input[type=text] { font: inherit; color: var(--ink); padding: 8px 14px; background: #fff; border: 2.5px solid var(--ink); border-radius: 12px; min-width: 0; flex: 1; max-width: 340px; outline: none; }
+  input[type=text]:focus { box-shadow: var(--shadow-sm); }
+  .badge { display: inline-block; font-size: 11px; font-weight: 800; padding: 0 8px; border-radius: 6px; background: #fff; border: 2px solid var(--ink); color: var(--ink); line-height: 1.6; }
+  .badge-new { background: var(--tomato); color: #fff; }
+  .badge-team { background: var(--sun); }
+  .badge-max { background: var(--mint); color: #fff; }
+  .badge-warn { background: #ffd2c7; }
+  .num { text-align: right; font-family: var(--display); font-weight: 400; font-variant-numeric: tabular-nums; }
 
-  /* カードタイル（光円錐風） */
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 18px; }
+  /* ステップ表示 */
+  .steps { display: flex; list-style: none; padding: 0; margin: 0 0 24px; gap: 8px; counter-reset: step; }
+  .steps li { flex: 1; counter-increment: step; padding: 6px 10px; font-size: 13px; font-weight: 800; color: var(--muted); background: var(--paper-2); border: 2px dashed var(--muted); border-radius: 12px; }
+  .steps li::before { content: counter(step); display: inline-grid; place-items: center; width: 20px; height: 20px; margin-right: 6px; border-radius: 50%; background: var(--muted); color: #fff; font-size: 12px; }
+  .steps li.done { color: var(--ink); border: 2px solid var(--ink); }
+  .steps li.done::before { background: var(--mint); }
+  .steps li.current { color: var(--ink); background: var(--sun); border: 2.5px solid var(--ink); box-shadow: var(--shadow-sm); }
+  .steps li.current::before { background: var(--ink); }
+
+  /* ===== カード ===== */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 18px; }
   .card-form { margin: 0; display: contents; }
-  .card { --rc: var(--r1); --rd: var(--r1-d); position: relative; display: flex; flex-direction: column; width: 100%; min-height: 300px;
-          text-align: left; font: inherit; color: var(--text); text-decoration: none; padding: 0; border: 0; overflow: hidden;
-          background:
-            radial-gradient(circle at 70% 35%, rgba(255,255,255,.18), transparent 45%),
-            linear-gradient(160deg, var(--rc) 0%, var(--rd) 75%, #0b0d18 100%);
-          clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%);
-          box-shadow: inset 0 0 0 1px rgba(255,255,255,.14);
-          transition: transform .15s, filter .15s; }
-  .card::after { content: ""; position: absolute; inset: 0; pointer-events: none;
-                 box-shadow: inset 0 -60px 50px -20px rgba(5,6,14,.85); }
-  .card.r1 { --rc: var(--r1); --rd: var(--r1-d); } .card.r2 { --rc: var(--r2); --rd: var(--r2-d); }
-  .card.r3 { --rc: var(--r3); --rd: var(--r3-d); } .card.r4 { --rc: var(--r4); --rd: var(--r4-d); }
-  .card.r5 { --rc: var(--r5); --rd: var(--r5-d); }
+  .card { --rc: var(--sky); position: relative; display: flex; flex-direction: column; width: 100%; min-height: 290px; padding: 0; text-align: left;
+          font: inherit; color: var(--ink); text-decoration: none; background: #fff; border: 2.5px solid var(--ink); border-radius: 14px; overflow: hidden;
+          box-shadow: var(--shadow); transition: transform .12s, box-shadow .12s; }
+  .card.r3 { --rc: var(--sky); } .card.r4 { --rc: var(--grape); } .card.r5 { --rc: var(--sun); }
   .card.clickable { cursor: pointer; }
-  .card.clickable:hover, .card.clickable:focus-visible { transform: translateY(-4px); outline: none;
-          filter: brightness(1.12) drop-shadow(0 0 12px rgba(232,201,143,.45)); }
-  .card.disabled { filter: grayscale(.85) brightness(.55); }
-  .card-band { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: center; padding: 10px 12px 0; font-size: 12px; }
-  .card-band .stars { color: #ffd88a; letter-spacing: 2px; text-shadow: 0 0 6px rgba(255,200,100,.7); font-size: 14px; }
-  .card-band .uid { font-family: "Rajdhani", sans-serif; font-weight: 600; color: rgba(255,255,255,.7); margin-right: 14px; }
-  .emblem { position: absolute; right: -6px; top: 26px; font-size: 120px; font-weight: 900; line-height: 1; color: rgba(255,255,255,.10);
-            pointer-events: none; }
-  .card-body { position: relative; z-index: 1; margin-top: auto; padding: 12px; }
-  .card-name { font-size: 17px; font-weight: 700; margin-bottom: 2px; text-shadow: 0 1px 4px rgba(0,0,0,.6); }
-  .lb { font-size: 11px; color: rgba(255,255,255,.7); display: flex; align-items: center; gap: 2px; }
-  .lb i { display: inline-block; width: 9px; height: 9px; transform: rotate(45deg); border: 1px solid #ffd88a; margin-left: 4px; }
-  .lb i.on { background: #ffd88a; box-shadow: 0 0 6px rgba(255,216,138,.8); }
-  .stats { display: flex; gap: 14px; margin: 8px 0 0; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.15); }
-  .stats div { display: flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
-  .stats dt { font-family: "Rajdhani", sans-serif; font-size: 12px; color: rgba(255,255,255,.65); font-weight: 600; letter-spacing: .1em; }
-  .stats dd { margin: 0; font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 17px; font-variant-numeric: tabular-nums; }
-  .stats .up { color: #8ff0b2; font-size: 13px; }
+  .card.clickable:hover, .card.clickable:focus-visible { transform: translate(-2px, -3px) rotate(-.6deg); box-shadow: 6px 7px 0 var(--ink); outline: none; }
+  .card.disabled { filter: grayscale(.9); opacity: .55; }
+  /* イラスト部分：レア度の色＋斜めのストライプ */
+  .card::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 64%; z-index: 0;
+                  background: repeating-linear-gradient(-45deg, rgba(255,255,255,.22) 0 8px, transparent 8px 16px), var(--rc); border-bottom: 2.5px solid var(--ink); }
+  .card.r5::before { background: repeating-linear-gradient(-45deg, rgba(255,255,255,.35) 0 8px, transparent 8px 16px), linear-gradient(135deg, #ffd85e, #ff9f43); }
+  .card-band { position: relative; z-index: 2; display: flex; align-items: center; gap: 4px; padding: 8px 10px 0; font-size: 12px; }
+  .card-band .stars { color: #fff; letter-spacing: 1px; font-size: 14px; -webkit-text-stroke: 1px var(--ink); paint-order: stroke; text-shadow: 1px 1px 0 var(--ink); }
+  .card-band .uid { margin-left: auto; font-family: var(--display); color: var(--ink); background: #fff; border: 2px solid var(--ink); border-radius: 6px; padding: 0 5px; font-size: 11px; }
+  .card-band .lv { margin-left: auto; font-size: 11px; font-weight: 800; background: var(--ink); color: var(--paper); border-radius: 6px; padding: 0 6px; }
+  .card-band .lv b { font-family: var(--display); font-weight: 400; font-size: 14px; color: #fff; }
+  .card-band .elem + .lv, .card-band .elem + .uid { margin-left: 0; }
+  .card-art { position: absolute; left: 0; right: 0; top: 18px; z-index: 1; width: 100%; height: 54%; object-fit: contain; pointer-events: none; transition: transform .2s; }
+  .card.clickable:hover .card-art { transform: scale(1.06) rotate(2deg); }
+  .emblem { position: absolute; right: 6px; top: 30px; z-index: 1; font-family: var(--display); font-size: 90px; line-height: 1; color: rgba(255,255,255,.5); }
+  .card-body { position: relative; z-index: 2; margin-top: auto; padding: 8px 10px 10px; background: #fff; }
+  .card-name { font-size: 15px; font-weight: 800; line-height: 1.3; }
+  .lb { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--muted); }
+  .lb i { display: inline-block; width: 9px; height: 9px; transform: rotate(45deg); border: 1.5px solid var(--ink); margin-left: 3px; background: #fff; }
+  .lb i.on { background: var(--tomato); }
+  .skill-line { display: inline-block; margin-top: 3px; font-size: 10px; font-weight: 800; padding: 0 6px; border-radius: 5px; background: var(--ink); color: var(--paper); }
+  .stats { display: flex; gap: 12px; margin: 6px 0 0; padding-top: 6px; border-top: 2px dashed #d8cfbf; }
+  .stats div { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; }
+  .stats dt { font-size: 11px; font-weight: 800; color: var(--muted); }
+  .stats dd { margin: 0; font-family: var(--display); font-size: 16px; font-variant-numeric: tabular-nums; }
+  .stats .up { color: var(--ok); font-size: 12px; }
   .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-  .card .badges { position: absolute; top: 34px; left: 10px; right: 10px; margin: 0; z-index: 2; flex-direction: column; align-items: flex-start; }
-  .badge { font-size: 11px; font-weight: 700; padding: 1px 9px; border-radius: 999px; background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.25); }
-  .badge-team { color: #ffd88a; border-color: rgba(255,216,138,.6); }
-  .badge-max { color: #cfe0ff; border-color: rgba(180,205,255,.6); }
-  .badge-warn { color: #ffb3b3; border-color: rgba(255,140,140,.6); }
-  .card-note { margin-top: 6px; font-size: 11px; color: rgba(255,255,255,.7); }
+  .card .badges { position: absolute; top: 34px; left: 8px; right: 8px; margin: 0; z-index: 3; flex-direction: column; align-items: flex-start; gap: 3px; }
+  .card-note { margin-top: 4px; font-size: 11px; color: var(--muted); }
   .card.large { min-height: 340px; }
-  .card.large .card-name { font-size: 21px; }
+  .card.large .card-name { font-size: 19px; }
+  .card.lb2 { box-shadow: 4px 4px 0 var(--ink), 0 0 0 4px var(--sun) inset; }
+  .elem { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; flex: none; font-size: 11px; font-weight: 800;
+          color: var(--ink); background: var(--ec); border: 2px solid var(--ink); margin-right: 3px; }
 
-  /* カードイラスト（限界突破するほど光る） */
-  .card-art { position: absolute; left: 0; right: 0; top: 22px; width: 100%; height: 60%; object-fit: contain; pointer-events: none;
-              transition: transform .25s; }
-  .card.clickable:hover .card-art { transform: scale(1.05); }
-  .card.lb1 .card-art { filter: drop-shadow(0 0 8px rgba(255,230,170,.55)); }
-  .card.lb2 .card-art { filter: drop-shadow(0 0 14px rgba(255,216,138,.9)) saturate(1.15); }
-  .card.lb2::before { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
-                      background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,.18) 45%, transparent 60%); }
-  .banner-art { position: absolute; right: 10px; bottom: -10px; display: flex; pointer-events: none; }
-  .banner-art img { width: 190px; height: 250px; object-fit: contain; filter: drop-shadow(0 0 18px rgba(255,210,140,.5)); }
-  .banner-art img + img { margin-left: -60px; margin-top: -30px; }
-  .banner > *:not(.banner-art) { position: relative; z-index: 1; }
-  @media (max-width: 720px) { .banner-art { opacity: .35; } }
-  /* 強化前→強化後 */
-  .compare { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); gap: 20px; align-items: center; max-width: 520px; margin: 0 auto; }
-  .compare .arrow { font-size: 0; width: 34px; height: 34px; position: relative; }
-  .compare .arrow::before { content: ""; position: absolute; inset: 8px; border-top: 2px solid var(--gold); border-right: 2px solid var(--gold);
-                            transform: rotate(45deg); filter: drop-shadow(0 0 6px rgba(232,201,143,.8)); }
-  .compare .label { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 8px; text-align: center; letter-spacing: .2em; }
-  .idchange { text-align: center; font-size: 15px; color: var(--muted); margin: 22px 0 4px; }
-  .idchange strong { font-family: "Rajdhani", sans-serif; font-size: 30px; color: var(--gold); margin: 0 6px; text-shadow: 0 0 12px rgba(232,201,143,.6); }
-  .celebrate { text-align: center; margin: 0 0 20px; }
-  .celebrate .en { display: block; color: var(--gold); font-size: 13px; letter-spacing: .5em; }
-  .celebrate .ja { display: block; font-size: 24px; font-weight: 700;
-                   background: linear-gradient(90deg, #fff6e0, var(--gold), #fff6e0); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  /* 強化前→強化後（限界突破） */
+  .compare { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); gap: 18px; align-items: center; max-width: 520px; margin: 0 auto; }
+  .compare .arrow { font-size: 0; width: 40px; height: 40px; border-radius: 50%; background: var(--tomato); border: 2.5px solid var(--ink); position: relative; box-shadow: var(--shadow-sm); }
+  .compare .arrow::before { content: ""; position: absolute; left: 9px; top: 12px; width: 10px; height: 10px; border-top: 3px solid #fff; border-right: 3px solid #fff; transform: rotate(45deg); }
+  .compare .label { font-size: 13px; font-weight: 800; text-align: center; margin-bottom: 8px; }
+  .idchange { text-align: center; font-size: 15px; margin: 22px 0 4px; }
+  .idchange strong { font-family: var(--display); font-weight: 400; font-size: 28px; margin: 0 6px; }
+  .celebrate { text-align: center; margin: 0 0 18px; }
+  .celebrate .ja { display: inline-block; font-family: var(--display); font-size: 26px; padding: 2px 18px; background: var(--sun); border: 2.5px solid var(--ink); border-radius: 12px; transform: rotate(-2deg); box-shadow: var(--shadow); }
   @media (max-width: 600px) {
     .compare { grid-template-columns: 1fr; justify-items: stretch; }
     .compare .arrow { transform: rotate(90deg); justify-self: center; }
-    .steps li { font-size: 11px; }
-    .group-head .to { margin-left: 0; width: 100%; }
+    .steps li { font-size: 11px; padding: 4px 6px; }
   }
 
-  /* メニュー */
-  .menu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
-  .menu-item { position: relative; display: block; padding: 22px 24px; text-decoration: none; color: var(--text); overflow: hidden;
-               background: linear-gradient(120deg, rgba(232,201,143,.10), rgba(22,27,52,.7) 55%); border: 1px solid var(--line);
-               clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%); transition: border-color .15s, filter .15s; }
-  .menu-item::after { content: ""; position: absolute; right: 20px; top: 50%; width: 10px; height: 10px; margin-top: -5px;
-                      border-top: 2px solid var(--gold); border-right: 2px solid var(--gold); transform: rotate(45deg); }
-  .menu-item:hover { border-color: rgba(232,201,143,.6); filter: brightness(1.15); }
-  .menu-item .en { display: block; font-size: 11px; color: var(--gold); }
-  .menu-item .t { font-weight: 700; font-size: 18px; }
-  .menu-item .d { font-size: 13px; color: var(--muted); padding-right: 24px; }
+  /* グループ見出し（限界突破の一覧など） */
+  .group { margin-bottom: 30px; }
+  .group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .group-head h2 { margin: 0; }
+  .group-head .count { font-family: var(--display); background: var(--ink); color: var(--paper); border-radius: 8px; padding: 0 8px; }
+  .group-head .to { margin-left: auto; font-size: 13px; color: var(--muted); }
 
-  /* ユーザー一覧 */
-  .user-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
-  .user-item { display: flex; align-items: center; gap: 14px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); }
-  .user-item.me { border-color: rgba(232,201,143,.7); box-shadow: 0 0 16px rgba(232,201,143,.18) inset; }
-  .avatar { width: 44px; height: 44px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 700;
-            color: #1a1b26; background: radial-gradient(circle at 35% 30%, #fff6e0, var(--gold) 60%, var(--gold-deep));
-            box-shadow: 0 0 0 2px rgba(10,13,26,1), 0 0 0 3px rgba(232,201,143,.6); }
+  /* ===== 一覧・表 ===== */
+  .user-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; }
+  .user-item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--paper-2); border: 2.5px solid var(--ink); border-radius: 14px; box-shadow: var(--shadow-sm); }
+  .user-item.me { background: #fff3c4; }
+  .avatar { width: 44px; height: 44px; flex: none; display: grid; place-items: center; border-radius: 12px; font-family: var(--display); font-size: 20px;
+            background: var(--rose); color: #fff; border: 2.5px solid var(--ink); -webkit-text-stroke: 1px var(--ink); }
+  .user-item:nth-child(3n+2) .avatar { background: var(--sky); } .user-item:nth-child(3n) .avatar { background: var(--mint); }
   .user-item .info { flex: 1; min-width: 0; }
-  .user-item .name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .user-item .name { font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .user-item form { margin: 0; }
-  .user-item .btn { padding: 6px 16px 6px 8px; font-size: 13px; }
-  .user-item .btn::before { width: 14px; height: 14px; box-shadow: inset 0 0 0 4px #dcd5c6, inset 0 0 0 6px #1a1b26; }
-
-  /* ナビゲーション */
-  .gems { display: inline-flex; align-items: center; gap: 6px; padding: 3px 12px 3px 6px; border-radius: 999px;
-          background: rgba(0,0,0,.35); border: 1px solid rgba(232,201,143,.35); font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 15px; }
-  .gem-icon { display: inline-block; width: 14px; height: 14px; transform: rotate(45deg); flex: none;
-              background: linear-gradient(135deg, #fff6e0, #9fd4ff 45%, #7b6cff); box-shadow: 0 0 8px rgba(160,200,255,.8); }
-  .gnav { max-width: 1000px; margin: 10px auto 0; display: flex; gap: 4px; flex-wrap: wrap; }
-  .gnav a { color: var(--muted); text-decoration: none; padding: 4px 12px; font-size: 13px; border-bottom: 2px solid transparent; }
-  .gnav a:hover { color: var(--text); }
-  .gnav a.active { color: var(--gold); border-bottom-color: var(--gold); }
-
-  /* テーブル */
+  .user-item .btn { padding: 4px 14px; font-size: 13px; }
   .table-wrap { overflow-x: auto; }
-  table.list { width: 100%; border-collapse: collapse; font-size: 14px; }
-  table.list th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 700; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-  table.list td { padding: 9px 10px; border-bottom: 1px solid rgba(255,255,255,.05); white-space: nowrap; }
-  table.list tr.me td { background: var(--primary-soft); }
-  .num { text-align: right; font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 16px; font-variant-numeric: tabular-nums; }
-  .r-text-3 { color: #8db4ff; } .r-text-4 { color: #c9a2ff; } .r-text-5 { color: #ffd88a; }
-  .win { color: #8ff0b2; font-weight: 700; } .lose { color: #ff9a9a; font-weight: 700; }
+  table.list { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 14px; }
+  table.list th { text-align: left; font-size: 12px; font-weight: 800; padding: 6px 10px; border-bottom: 2.5px solid var(--ink); white-space: nowrap; }
+  table.list td { padding: 8px 10px; border-bottom: 1.5px dashed #d8cfbf; white-space: nowrap; }
+  table.list tr.me td { background: #fff3c4; }
+  .r-text-3 { color: var(--sky); } .r-text-4 { color: var(--grape); } .r-text-5 { color: #e08a00; }
+  .win { color: var(--ok); font-weight: 800; } .lose { color: var(--danger); font-weight: 800; }
+  .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 18px; align-items: center; }
+  .filters a { text-decoration: none; padding: 2px 14px; font-size: 13px; font-weight: 800; background: var(--paper-2); border: 2px solid var(--ink); border-radius: 999px; }
+  .filters a.active { background: var(--ink); color: var(--paper); }
+  .filters .sep { width: 2px; height: 20px; background: var(--ink); margin: 0 4px; opacity: .3; }
+  .stat-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat { padding: 12px 16px; background: var(--paper-2); border: 2.5px solid var(--ink); border-radius: 14px; box-shadow: var(--shadow-sm); }
+  .stat .label { display: block; font-size: 12px; font-weight: 800; color: var(--muted); }
+  .stat b { font-family: var(--display); font-weight: 400; font-size: 26px; }
+  .power { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .power .label { font-size: 13px; font-weight: 800; }
+  .power b { font-family: var(--display); font-weight: 400; font-size: 30px; color: var(--tomato); -webkit-text-stroke: 1px var(--ink); }
 
-  /* ガチャ */
-  .banner { position: relative; overflow: hidden; padding: 32px 28px; margin-bottom: 24px; border: 1px solid rgba(232,201,143,.35);
-            background:
-              radial-gradient(circle at 80% 40%, rgba(255,220,150,.35), transparent 35%),
-              radial-gradient(circle at 75% 45%, rgba(150,120,255,.35), transparent 55%),
-              linear-gradient(120deg, #1b1f45 0%, #2a1f55 50%, #4a3418 100%);
-            clip-path: polygon(0 0, calc(100% - 26px) 0, 100% 26px, 100% 100%, 26px 100%, 0 calc(100% - 26px)); }
-  .banner .en { color: var(--gold); font-size: 12px; letter-spacing: .4em; }
-  .banner h2 { font-size: 30px; margin: 4px 0 8px; letter-spacing: .1em; }
-  .banner p { color: #d8d6e8; margin: 0 0 16px; max-width: 520px; }
+  /* ===== ガチャ ===== */
+  .banner { position: relative; overflow: hidden; padding: 26px 24px; margin-bottom: 24px; border: 2.5px solid var(--ink); border-radius: 18px; box-shadow: var(--shadow);
+            background: repeating-conic-gradient(from 0deg at 80% 50%, #ffcf4a 0 10deg, #ffb52e 10deg 20deg); }
+  .banner h2 { display: inline-block; font-size: 30px; margin: 0 0 10px; padding: 0 12px; background: #fff; border: 2.5px solid var(--ink); border-radius: 10px; transform: rotate(-1.5deg); box-shadow: var(--shadow-sm); }
+  .banner p { margin: 0 0 14px; max-width: 520px; font-weight: 700; }
   .banner .pickup { display: flex; gap: 8px; flex-wrap: wrap; }
-  .banner .pickup span { padding: 3px 12px; border: 1px solid rgba(255,216,138,.6); color: #ffd88a; font-size: 13px; background: rgba(0,0,0,.3); }
-  .pity { display: flex; align-items: center; gap: 12px; margin-top: 18px; font-size: 13px; color: var(--muted); }
-  .pity-bar { flex: 1; max-width: 320px; height: 6px; background: rgba(255,255,255,.12); border-radius: 3px; overflow: hidden; }
-  .pity-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold-deep), #ffd88a); }
+  .banner .pickup span { padding: 0 10px; font-size: 13px; font-weight: 800; background: var(--tomato); color: #fff; border: 2px solid var(--ink); border-radius: 8px; }
+  .banner-art { position: absolute; right: 6px; bottom: -14px; display: flex; pointer-events: none; }
+  .banner-art img { width: 190px; height: 240px; object-fit: contain; filter: drop-shadow(4px 4px 0 var(--ink)); }
+  .banner-art img + img { margin-left: -64px; margin-top: -26px; }
+  .banner > *:not(.banner-art) { position: relative; z-index: 1; }
+  @media (max-width: 720px) { .banner-art { opacity: .3; } }
+  .pity { display: flex; align-items: center; gap: 10px; margin-top: 16px; font-size: 13px; font-weight: 800; flex-wrap: wrap; }
+  .pity-bar, .meter-bar { height: 12px; border: 2px solid var(--ink); border-radius: 999px; background: #fff; overflow: hidden; }
+  .pity-bar { flex: 1; max-width: 300px; }
+  .pity-bar i, .meter-bar i { display: block; height: 100%; background: repeating-linear-gradient(-45deg, var(--tomato) 0 6px, #ff7d5f 6px 12px); }
+  .meter-bar.done i { background: repeating-linear-gradient(-45deg, var(--mint) 0 6px, #4fd8b2 6px 12px); }
   .pull-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
   .pull-row form { margin: 0; }
-  .pull-row .btn small { font-family: "Rajdhani", sans-serif; font-weight: 700; margin-left: 6px; display: inline-flex; align-items: center; gap: 4px; }
-  .btn[disabled] { opacity: .45; cursor: not-allowed; transform: none; }
-  .gacha-result .card { animation: reveal .5s both; }
-  .gacha-result .card:nth-child(1) { animation-delay: 0s; } .gacha-result .card:nth-child(2) { animation-delay: 0.08s; } .gacha-result .card:nth-child(3) { animation-delay: 0.16s; } .gacha-result .card:nth-child(4) { animation-delay: 0.24s; } .gacha-result .card:nth-child(5) { animation-delay: 0.32s; } .gacha-result .card:nth-child(6) { animation-delay: 0.4s; } .gacha-result .card:nth-child(7) { animation-delay: 0.48s; } .gacha-result .card:nth-child(8) { animation-delay: 0.56s; } .gacha-result .card:nth-child(9) { animation-delay: 0.64s; } .gacha-result .card:nth-child(10) { animation-delay: 0.72s; }
-  .gacha-result .card.r5 { box-shadow: inset 0 0 0 1px rgba(255,216,138,.8), 0 0 24px rgba(255,200,100,.6); }
-  .gacha-result .card.r4 { box-shadow: inset 0 0 0 1px rgba(200,160,255,.7), 0 0 18px rgba(170,120,255,.45); }
-  @keyframes reveal { from { opacity: 0; transform: translateY(14px) scale(.96); } to { opacity: 1; transform: none; } }
-  .badge-new { color: #1a1b26; background: #ffd88a; border-color: #ffd88a; }
+  .pull-row .btn { font-size: 17px; padding: 10px 22px; }
+  .pull-row .btn small { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; font-family: var(--display); font-size: 14px; }
+  .pull-row form:last-of-type .btn { background: var(--tomato); color: #fff; }
+  .gacha-result .grid > * { animation: cardIn .45s both; }
+  .gacha-result .card.r5 { box-shadow: 4px 4px 0 var(--ink), 0 0 0 4px #ffd85e; }
+  @keyframes cardIn { 0% { transform: translateY(20px) rotate(-6deg) scale(.8); opacity: 0; } 70% { transform: rotate(2deg) scale(1.04); opacity: 1; } 100% { transform: none; } }
+  .warp { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; overflow: hidden; cursor: pointer;
+          background: repeating-conic-gradient(from 0deg, var(--wc) 0 12deg, var(--ink) 12deg 24deg); animation: warpSpin 2.2s linear forwards; }
+  .warp[hidden] { display: none; }
+  .warp .tunnel { display: none; }
+  .warp .orb { width: 34vmin; height: 34vmin; border-radius: 50%; background: #fff; border: 6px solid var(--ink); box-shadow: 8px 8px 0 var(--ink);
+               display: grid; place-items: center; animation: orbPop 2.2s ease-in forwards; }
+  .warp .orb::after { content: "?"; font-family: var(--display); font-size: 18vmin; color: var(--ink); }
+  .warp .skip { position: absolute; right: 16px; top: 16px; z-index: 2; font: inherit; font-weight: 800; color: var(--ink); background: #fff; border: 2.5px solid var(--ink); border-radius: 999px; padding: 4px 16px; cursor: pointer; }
+  .warp .hint { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); padding: 2px 14px; font-weight: 800; color: var(--ink); background: #fff; border: 2.5px solid var(--ink); border-radius: 999px; }
+  .warp .hint::before { content: "タップでスキップ"; } .warp .hint { font-size: 0; } .warp .hint::before { font-size: 13px; }
+  @keyframes warpSpin { to { background-position: 0 0; filter: hue-rotate(0); } }
+  @keyframes orbPop { 0% { transform: scale(0) rotate(-30deg); } 25% { transform: scale(1.1) rotate(8deg); } 35%, 70% { transform: scale(1) rotate(0); }
+                      75% { transform: scale(1.1) rotate(-6deg); } 80% { transform: scale(1.1) rotate(6deg); } 100% { transform: scale(14); opacity: 0; } }
 
-  /* チーム編成 */
+  /* ===== チーム編成 ===== */
   .slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-  .slot-empty { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px; min-height: 300px;
-                border: 1px dashed rgba(255,255,255,.25); color: var(--muted); text-decoration: none; font-size: 13px;
-                clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); transition: border-color .15s, color .15s; }
-  .slot-empty::before { content: "+"; font-size: 34px; line-height: 1; font-weight: 300; }
-  .slot-empty:hover { border-color: var(--gold); color: var(--gold); }
   .slot-wrap { display: flex; flex-direction: column; gap: 8px; }
-  .slot-wrap.selected .card { filter: drop-shadow(0 0 12px rgba(232,201,143,.7)); }
-  .slot-label { font-family: "Rajdhani", sans-serif; font-size: 12px; color: var(--muted); letter-spacing: .2em; }
+  .slot-wrap.selected .card { box-shadow: 4px 4px 0 var(--ink), 0 0 0 4px var(--tomato); }
+  .slot-label { font-family: var(--display); font-size: 13px; }
+  .slot-label::before { content: "枠 "; }
+  .slot-empty { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 4px; min-height: 290px; border: 2.5px dashed var(--ink);
+                border-radius: 14px; text-decoration: none; font-size: 13px; font-weight: 800; background: rgba(255,255,255,.5); }
+  .slot-empty::before { content: "+"; font-family: var(--display); font-size: 40px; line-height: 1; }
+  .slot-empty:hover { background: #fff3c4; }
   .slot-actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .slot-actions form { margin: 0; }
-  .mini { font: inherit; font-size: 12px; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 999px;
-          padding: 2px 10px; cursor: pointer; text-decoration: none; }
-  .mini:hover { border-color: var(--gold); }
-  .power { display: flex; align-items: baseline; gap: 10px; }
-  .power .en { color: var(--muted); font-size: 12px; }
-  .power b { font-family: "Rajdhani", sans-serif; font-size: 32px; color: var(--gold); text-shadow: 0 0 10px rgba(232,201,143,.5); }
   @media (max-width: 720px) { .slots { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
-  /* バトル・ホーム */
-  .vs { display: grid; grid-template-columns: 1fr auto 1fr; gap: 16px; align-items: center; text-align: center; }
-  .vs .side .name { font-weight: 700; font-size: 18px; }
-  .vs .vs-mark { font-family: "Rajdhani", sans-serif; font-size: 34px; font-weight: 700; color: var(--gold); letter-spacing: .1em; }
-  .result-word { font-family: "Rajdhani", sans-serif; font-size: 48px; font-weight: 700; letter-spacing: .3em; text-align: center; margin: 0; }
-  .result-word.win { color: #ffd88a; text-shadow: 0 0 20px rgba(255,216,138,.7); }
-  .result-word.lose { color: #9aa0b8; }
-  .stat-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; margin-bottom: 24px; }
-  .stat { padding: 16px 18px; background: var(--surface); border: 1px solid var(--line); }
-  .stat .en { display: block; font-size: 11px; color: var(--muted); }
-  .stat b { font-family: "Rajdhani", sans-serif; font-size: 26px; }
-  .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 18px; align-items: center; }
-  .filters a { color: var(--muted); text-decoration: none; padding: 4px 14px; border: 1px solid var(--line); border-radius: 999px; font-size: 13px; }
-  .filters a.active { color: #1a1b26; background: var(--gold); border-color: var(--gold); font-weight: 700; }
-  .filters .sep { width: 1px; height: 20px; background: var(--line); margin: 0 6px; }
-
-  /* 戦闘シーン（敵が上・味方が下） */
-  .arena { position: relative; overflow: hidden; margin: 18px 0; padding: 14px 12px 18px; border: 1px solid var(--line);
-           background:
-             radial-gradient(ellipse 60% 40% at 50% 0%, rgba(255,90,90,.16), transparent 70%),
-             radial-gradient(ellipse 60% 40% at 50% 100%, rgba(95,211,138,.12), transparent 70%),
-             rgba(5,7,16,.55); }
+  /* ===== バトル ===== */
+  .vs { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: center; text-align: center; }
+  .vs .side .name { font-weight: 800; font-size: 18px; }
+  .vs .vs-mark { font-family: var(--display); font-size: 30px; color: #fff; background: var(--tomato); border: 2.5px solid var(--ink); border-radius: 50%; width: 64px; height: 64px; display: grid; place-items: center; transform: rotate(-8deg); box-shadow: var(--shadow-sm); }
+  .result-word { font-family: var(--display); font-size: 46px; text-align: center; margin: 0; -webkit-text-stroke: 2px var(--ink); paint-order: stroke; text-shadow: 4px 4px 0 var(--ink); }
+  .result-word.win { color: var(--sun); }
+  .result-word.lose { color: #b8b0a2; }
+  .arena { position: relative; overflow: hidden; margin: 16px 0; padding: 14px 10px 16px; border: 2.5px solid var(--ink); border-radius: 16px;
+           background: linear-gradient(#ffd9cc 0 50%, #cdeedd 50% 100%); }
+  .arena::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; border-top: 2.5px dashed var(--ink); opacity: .35; }
   .arena.flash { animation: arenaFlash .5s; }
   .battle-controls { position: absolute; top: 10px; right: 10px; z-index: 3; display: flex; gap: 6px; }
   .battle:not(.playing) .battle-controls { display: none; }
-  .side-label { font-size: 11px; color: var(--muted); text-align: center; margin-bottom: 4px; }
-  .unit-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
-  .turn-banner { text-align: center; margin: 14px 0; font-size: 22px; font-weight: 700; color: var(--gold); text-shadow: 0 0 12px rgba(232,201,143,.6); }
+  .side-label { position: relative; font-size: 12px; font-weight: 800; text-align: center; margin-bottom: 6px; }
+  .unit-row { position: relative; display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
+  .turn-banner { position: relative; z-index: 2; width: max-content; margin: 12px auto; padding: 0 16px; font-family: var(--display); font-size: 20px; background: #fff; border: 2.5px solid var(--ink); border-radius: 10px; box-shadow: var(--shadow-sm); }
   .turn-banner.pop { animation: bannerPop .45s; }
-  .unit { position: relative; width: 116px; padding: 8px; background: var(--surface-2); border: 1px solid var(--line); text-align: center;
-          transition: transform .18s ease-out, filter .4s, box-shadow .18s; }
-  .unit img { width: 100%; height: 72px; object-fit: contain; }
-  .unit.boss { width: 160px; border-color: rgba(255,140,140,.6); box-shadow: 0 0 14px rgba(255,90,90,.25) inset; }
-  .unit.boss img { height: 100px; }
-  .unit.down { filter: grayscale(1) brightness(.45); }
-  .unit.acting { z-index: 2; box-shadow: 0 0 18px rgba(232,201,143,.7); border-color: var(--gold); }
-  .unit-side.ally .unit.acting { transform: translateY(-16px) scale(1.06); }
-  .unit-side.enemy .unit.acting { transform: translateY(16px) scale(1.06); }
+  .unit { position: relative; width: 112px; padding: 6px; background: #fff; border: 2.5px solid var(--ink); border-radius: 12px; text-align: center; box-shadow: var(--shadow-sm);
+          transition: transform .18s ease-out, filter .4s; }
+  .unit img { width: 100%; height: 70px; object-fit: contain; }
+  .unit.boss { width: 156px; background: #fff3c4; }
+  .unit.boss img { height: 98px; }
+  .unit.down { filter: grayscale(1); opacity: .5; }
+  .unit.acting { z-index: 2; background: #fff3c4; }
+  .unit-side.ally .unit.acting { transform: translateY(-14px) rotate(-3deg); }
+  .unit-side.enemy .unit.acting { transform: translateY(14px) rotate(3deg); }
   .unit.hit { animation: hitShake .35s; }
   .unit.ko { animation: koFall .6s forwards; }
-  .unit.hit img, .unit.ko img { animation: hitFlash .35s; }
-  .dmg-pop { position: absolute; left: 50%; top: 24px; z-index: 4; pointer-events: none; white-space: nowrap;
-             font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 24px; color: #fff;
-             text-shadow: 0 0 6px rgba(255,80,80,.9), 0 2px 2px #000; animation: dmgUp .9s forwards; }
-  .dmg-pop.crit { font-size: 32px; color: #ffd88a; text-shadow: 0 0 10px rgba(255,180,60,.9), 0 2px 2px #000; }
+  .unit.buff { animation: buffJump .5s; }
+  .unit-name { display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .unit-name .elem { width: 16px; height: 16px; font-size: 9px; border-width: 1.5px; }
+  .unit-hp { font-family: var(--display); font-size: 11px; color: var(--muted); }
+  .hpbar { height: 9px; border: 2px solid var(--ink); border-radius: 999px; background: #fff; overflow: hidden; margin: 3px 0 1px; }
+  .hpbar i { display: block; height: 100%; background: var(--mint); transition: width .25s; }
+  .unit-side.enemy .hpbar i { background: var(--tomato); }
+  .dmg-pop { position: absolute; left: 50%; top: 22px; z-index: 4; pointer-events: none; white-space: nowrap; font-family: var(--display); font-size: 24px; color: #fff;
+             -webkit-text-stroke: 1.5px var(--ink); paint-order: stroke; text-shadow: 2px 2px 0 var(--ink); animation: dmgUp .9s forwards; }
+  .dmg-pop.crit { font-size: 30px; color: var(--sun); }
+  .dmg-pop.weak { color: #ff9f43; }
+  .dmg-pop.heal { color: var(--mint); }
+  .dmg-pop.guard { color: var(--sky); font-size: 18px; }
+  .boss-tag, .crit-tag, .ko-tag, .weak-tag, .resist-tag, .skill-tag { display: inline-block; font-size: 10px; font-weight: 800; padding: 0 6px; border-radius: 5px; margin: 0 3px; border: 1.5px solid var(--ink); line-height: 1.5; }
+  .boss-tag { background: var(--tomato); color: #fff; }
+  .crit-tag { background: var(--sun); }
+  .ko-tag { background: #fff; }
+  .weak-tag { background: #ff9f43; }
+  .resist-tag { background: #e6e0d4; }
+  .skill-tag { background: var(--ink); color: var(--paper); font-size: 11px; }
+  .heal-num { color: var(--ok); font-weight: 800; }
   .battle.playing .battle-after { display: none; }
-  .battle-after.show { animation: reveal .5s both; }
+  .battle-after.show { animation: cardIn .5s both; }
   .battle.playing .battle-log li.pending { display: none; }
-  .battle-log li.pending { animation: none; }
-  @keyframes bannerPop { 0% { transform: scale(.6); opacity: 0; } 60% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); } }
-  @keyframes hitShake { 0%,100% { transform: translateX(0); } 20% { transform: translateX(-7px); } 40% { transform: translateX(6px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(3px); } }
-  @keyframes hitFlash { 0% { filter: brightness(2.6) saturate(0); } 100% { filter: none; } }
-  @keyframes koFall { 0% { transform: none; } 30% { transform: translateX(-6px) rotate(-3deg); } 100% { transform: translateY(6px) rotate(4deg); } }
-  @keyframes dmgUp { 0% { transform: translate(-50%, 10px) scale(.7); opacity: 0; } 20% { transform: translate(-50%, 0) scale(1.15); opacity: 1; }
-                     100% { transform: translate(-50%, -34px) scale(1); opacity: 0; } }
-  @keyframes arenaFlash { 0% { box-shadow: inset 0 0 0 0 rgba(255,90,90,0); } 30% { box-shadow: inset 0 0 80px 10px rgba(255,90,90,.55); } 100% { box-shadow: inset 0 0 0 0 rgba(255,90,90,0); } }
-  @media (max-width: 600px) { .unit { width: 84px; padding: 6px; } .unit img { height: 52px; } .unit.boss { width: 120px; } .unit.boss img { height: 72px; } }
-  .unit-name { font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .unit-hp { font-family: "Rajdhani", sans-serif; font-size: 12px; color: var(--muted); }
-  .hpbar { height: 5px; background: rgba(255,255,255,.12); border-radius: 3px; overflow: hidden; margin: 4px 0 2px; }
-  .hpbar i { display: block; height: 100%; background: linear-gradient(90deg, #5fd38a, #b8f5c8); }
-  .unit-side.enemy .hpbar i { background: linear-gradient(90deg, #ff7a7a, #ffc2a8); }
-  .boss-tag, .crit-tag, .ko-tag { font-size: 10px; font-weight: 700; padding: 0 6px; border-radius: 999px; margin: 0 4px; }
-  .boss-tag { background: #ff7a7a; color: #1a1b26; }
-  .crit-tag { background: #ffd88a; color: #1a1b26; }
-  .ko-tag { border: 1px solid rgba(255,140,140,.6); color: #ffb3b3; }
-  .battle-log summary { cursor: pointer; font-weight: 700; margin-bottom: 8px; }
-  .battle-log ol { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font-size: 13px; }
-  .battle-log li { padding: 3px 10px; border-left: 2px solid transparent; animation: reveal .3s both; }
-  .battle-log li.ally { border-left-color: #5fd38a; }
-  .battle-log li.enemy { border-left-color: #ff7a7a; color: #e2dbe6; }
-  .battle-log li.aoe { background: rgba(255,90,90,.10); }
-  .battle-log li.turn { font-family: "Rajdhani", sans-serif; color: var(--gold); letter-spacing: .2em; margin-top: 8px; }
-  .battle-log .dmg { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 15px; }
+  .battle-log { margin-top: 10px; }
+  .battle-log summary { cursor: pointer; font-weight: 800; margin-bottom: 8px; }
+  .battle-log ol { list-style: none; margin: 0; padding: 8px; max-height: 300px; overflow-y: auto; font-size: 13px; background: #fff; border: 2px solid var(--ink); border-radius: 12px; }
+  .battle-log li { padding: 2px 8px; border-left: 4px solid transparent; }
+  .battle-log li.ally { border-left-color: var(--mint); }
+  .battle-log li.enemy { border-left-color: var(--tomato); }
+  .battle-log li.aoe { background: #fff0e6; }
+  .battle-log li.turn { font-family: var(--display); margin-top: 6px; }
+  .battle-log .dmg { font-family: var(--display); }
+  @keyframes bannerPop { 0% { transform: scale(.5) rotate(-6deg); } 60% { transform: scale(1.15) rotate(2deg); } 100% { transform: none; } }
+  @keyframes hitShake { 0%,100% { transform: none; } 25% { transform: translateX(-7px) rotate(-3deg); } 50% { transform: translateX(6px) rotate(2deg); } 75% { transform: translateX(-3px); } }
+  @keyframes koFall { to { transform: translateY(6px) rotate(8deg); } }
+  @keyframes buffJump { 40% { transform: translateY(-10px); } }
+  @keyframes dmgUp { 0% { transform: translate(-50%, 8px) scale(.6); opacity: 0; } 20% { transform: translate(-50%, 0) scale(1.2); opacity: 1; } 100% { transform: translate(-50%, -30px); opacity: 0; } }
+  @keyframes arenaFlash { 30% { filter: brightness(1.25) saturate(1.4); } }
+  @media (max-width: 600px) { .unit { width: 82px; padding: 4px; } .unit img { height: 50px; } .unit.boss { width: 116px; } .unit.boss img { height: 70px; } }
 
-  /* クエスト */
+  /* ===== クエスト ===== */
   .chapter { margin-bottom: 30px; }
-  .chapter-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
-  .chapter-head h2 { margin: 0; font-size: 18px; }
-  .chapter-head .en { color: var(--gold); font-size: 12px; }
-  .chapter-head .muted { width: 100%; }
-  .chapter-head .star-total { margin-left: auto; color: #ffd88a; font-family: "Rajdhani", sans-serif; font-weight: 700; }
+  .chapter-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chapter-head h2 { margin: 0; font-size: 20px; }
+  .chapter-head .muted { width: 100%; margin-top: -4px; }
+  .chapter-head .star-total { margin-left: auto; font-family: var(--display); padding: 0 10px; background: var(--ink); color: var(--sun); border-radius: 8px; }
   .stage-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
-  .stage { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--line);
-           clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%); }
-  .stage.boss { border-color: rgba(255,140,140,.45); background: linear-gradient(120deg, rgba(255,90,90,.12), var(--surface) 60%); }
-  .stage.locked { opacity: .45; }
-  .stage.next { border-color: rgba(232,201,143,.7); box-shadow: 0 0 18px rgba(232,201,143,.2) inset; }
-  .stage-top { display: flex; align-items: center; gap: 10px; }
-  .stage-no { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 20px; color: var(--gold); }
-  .stage-name { font-weight: 700; font-size: 16px; }
-  .stage-stars { margin-left: auto; letter-spacing: 2px; color: rgba(255,255,255,.2); }
-  .stage-stars .on { color: #ffd88a; text-shadow: 0 0 6px rgba(255,200,100,.7); }
+  .stage { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; background: var(--paper-2); border: 2.5px solid var(--ink); border-radius: 14px; box-shadow: var(--shadow-sm); }
+  .stage.boss { background: #ffe1d6; }
+  .stage.locked { opacity: .5; box-shadow: none; border-style: dashed; }
+  .stage.next { background: #fff3c4; box-shadow: var(--shadow); }
+  .stage.next::after { content: "つぎはここ！"; position: absolute; top: -12px; right: 14px; font-size: 12px; font-weight: 800; padding: 0 10px; color: #fff; background: var(--tomato); border: 2px solid var(--ink); border-radius: 999px; transform: rotate(3deg); }
+  .stage-top { display: flex; align-items: center; gap: 8px; }
+  .stage-no { font-family: var(--display); font-size: 15px; padding: 0 8px; background: var(--ink); color: var(--paper); border-radius: 7px; }
+  .stage-name { font-weight: 800; font-size: 16px; }
+  .stage-stars { margin-left: auto; letter-spacing: 1px; color: #d8cfbf; -webkit-text-stroke: 1px var(--ink); }
+  .stage-stars .on { color: var(--sun); }
   .stage-enemies { display: flex; gap: 4px; }
-  .stage-enemies img { width: 34px; height: 34px; object-fit: contain; background: rgba(0,0,0,.25); border-radius: 50%; padding: 2px; }
-  .stage-foot { display: flex; align-items: center; gap: 10px; margin-top: auto; padding-top: 6px; flex-wrap: wrap; }
+  .stage-enemies img { width: 36px; height: 36px; object-fit: contain; background: #fff; border: 2px solid var(--ink); border-radius: 50%; padding: 2px; }
+  .stage-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 6px; flex-wrap: wrap; }
   .stage-foot form { margin: 0 0 0 auto; }
-  .stage-foot .btn { padding: 6px 16px 6px 8px; font-size: 13px; }
-  .stage-foot .btn::before { width: 14px; height: 14px; box-shadow: inset 0 0 0 4px #dcd5c6, inset 0 0 0 6px #1a1b26; }
-  .star-goals { list-style: none; padding: 0; margin: 14px auto 0; max-width: 360px; font-size: 14px; }
-  .star-goals li { display: flex; gap: 10px; padding: 3px 0; color: var(--muted); }
-  .star-goals li::before { content: "★"; color: rgba(255,255,255,.2); }
-  .star-goals li.ok { color: var(--text); }
-  .star-goals li.ok::before { color: #ffd88a; text-shadow: 0 0 6px rgba(255,200,100,.7); }
+  .stage-foot .btn { padding: 4px 14px; font-size: 14px; }
+  .star-goals { list-style: none; padding: 0; margin: 14px auto 0; max-width: 360px; font-size: 14px; font-weight: 700; }
+  .star-goals li { display: flex; gap: 8px; padding: 2px 0; color: var(--muted); }
+  .star-goals li::before { content: "★"; color: #d8cfbf; -webkit-text-stroke: 1px var(--ink); }
+  .star-goals li.ok { color: var(--ink); }
+  .star-goals li.ok::before { color: var(--sun); }
+
+  /* ===== ミッション・プレゼント ===== */
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+  .tabs a { padding: 4px 16px; font-weight: 800; text-decoration: none; background: var(--paper-2); border: 2.5px solid var(--ink); border-radius: 12px; }
+  .tabs a.active { background: var(--ink); color: var(--paper); }
+  .mission-list, .present-list { display: grid; gap: 10px; margin-bottom: 20px; }
+  .mission, .present { display: grid; align-items: center; gap: 14px; padding: 12px 16px; background: var(--paper-2); border: 2.5px solid var(--ink); border-radius: 14px; box-shadow: var(--shadow-sm); }
+  .mission { grid-template-columns: 1fr auto auto; }
+  .mission.ready { background: #fff3c4; box-shadow: var(--shadow); }
+  .mission.claimed { opacity: .5; box-shadow: none; }
+  .mission .t { font-weight: 800; }
+  .mission .p { font-family: var(--display); font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .mission .meter-bar { margin-top: 6px; max-width: 320px; }
+  .mission form, .present form { margin: 0; }
+  .reward { display: inline-flex; align-items: center; gap: 6px; font-family: var(--display); font-size: 16px; }
+  .present { grid-template-columns: auto 1fr auto; }
+  .present .icon { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 12px; background: #fff; border: 2.5px solid var(--ink); }
+  .present .msg { font-size: 12px; color: var(--muted); }
+  @media (max-width: 560px) { .mission { grid-template-columns: 1fr auto; } .mission .reward { grid-column: 1; } }
+
+  /* ===== ホーム ===== */
+  .home-hero { position: relative; display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 18px; align-items: center; padding: 20px; margin-bottom: 22px; overflow: hidden;
+               background: repeating-conic-gradient(from 0deg at 25% 55%, #bfe4ff 0 10deg, #a8d8ff 10deg 20deg); border: 2.5px solid var(--ink); border-radius: 20px; box-shadow: var(--shadow); }
+  .home-hero .leader { position: relative; aspect-ratio: 1; display: grid; place-items: center; }
+  .home-hero .leader::before { content: ""; position: absolute; inset: 10%; border-radius: 50%; background: #fff; border: 3px solid var(--ink); box-shadow: 5px 5px 0 var(--ink); }
+  .home-hero .leader img { position: relative; z-index: 1; width: 78%; height: 78%; object-fit: contain; animation: bob 2.6s ease-in-out infinite; }
+  @keyframes bob { 50% { transform: translateY(-6px) rotate(-2deg); } }
+  .home-hero .hello { display: inline-block; font-size: 12px; font-weight: 800; padding: 0 10px; background: #fff; border: 2px solid var(--ink); border-radius: 999px; }
+  .home-hero .lname { display: flex; align-items: center; gap: 6px; font-family: var(--display); font-size: 24px; margin: 8px 0; }
+  .home-hero .lname small { font-family: var(--round); }
+  .home-hero .say { position: relative; padding: 12px 16px; margin: 0 0 16px 10px; font-weight: 700; background: #fff; border: 2.5px solid var(--ink); border-radius: 16px; box-shadow: var(--shadow-sm); }
+  .home-hero .say::before { content: ""; position: absolute; left: -12px; top: 16px; border: 7px solid transparent; border-right: 10px solid var(--ink); }
+  .home-hero .say::after { content: ""; position: absolute; left: -7px; top: 18px; border: 5px solid transparent; border-right: 7px solid #fff; }
+  .home-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .home-actions form { margin: 0; }
+  .home-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; margin-bottom: 26px; }
+  .tile { position: relative; display: flex; flex-direction: column; justify-content: flex-end; gap: 0; padding: 14px; min-height: 92px; text-decoration: none; color: var(--ink);
+          background: var(--paper-2); border: 2.5px solid var(--ink); border-radius: 16px; box-shadow: var(--shadow); transition: transform .1s, box-shadow .1s; }
+  .tile:hover { transform: translate(-1px, -2px); box-shadow: 5px 6px 0 var(--ink); }
+  .tile:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 var(--ink); }
+  .tile .t { font-family: var(--display); font-size: 19px; line-height: 1.3; }
+  .tile .d { font-size: 12px; color: var(--ink-soft); }
+  .tile .dot { position: absolute; top: -9px; right: -9px; min-width: 26px; height: 26px; padding: 0 6px; border-radius: 13px; background: var(--tomato); color: #fff;
+               font-size: 13px; font-weight: 800; line-height: 22px; text-align: center; border: 2.5px solid var(--ink); }
+  .tile.big { grid-column: span 2; background: var(--tomato); color: #fff; }
+  .tile.big .t { font-size: 26px; -webkit-text-stroke: 1px var(--ink); paint-order: stroke; text-shadow: 2px 2px 0 var(--ink); }
+  .tile.big .d { color: #fff; }
+  .home-tiles .tile:nth-child(2) { background: var(--mint); } .home-tiles .tile:nth-child(3) { background: var(--sky); }
+  .home-tiles .tile:nth-child(4) { background: var(--sun); } .home-tiles .tile:nth-child(5) { background: var(--grape); }
+  .home-tiles .tile:nth-child(2) .t, .home-tiles .tile:nth-child(3) .t, .home-tiles .tile:nth-child(5) .t { color: #fff; -webkit-text-stroke: 1px var(--ink); paint-order: stroke; text-shadow: 2px 2px 0 var(--ink); }
+  .home-tiles .tile:nth-child(2) .d, .home-tiles .tile:nth-child(3) .d, .home-tiles .tile:nth-child(5) .d { color: #fff; }
+  @media (max-width: 640px) { .home-hero { grid-template-columns: 1fr; } .home-hero .leader { max-width: 220px; width: 100%; margin: 0 auto; } .home-hero .say { margin-left: 0; }
+                              .home-hero .say::before, .home-hero .say::after { display: none; } }
+
+  /* ===== カード詳細 ===== */
+  .detail { display: grid; grid-template-columns: minmax(0, 290px) 1fr; gap: 24px; align-items: start; }
+  .detail .spec dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 0 0 18px; padding: 14px 16px; background: var(--paper-2); border: 2.5px solid var(--ink); border-radius: 14px; }
+  .detail .spec dt { font-size: 13px; font-weight: 800; color: var(--muted); }
+  .detail .spec dd { margin: 0; font-weight: 800; }
+  .detail .flavor { position: relative; margin: 0 0 16px; padding: 10px 14px; font-weight: 700; background: #fff; border: 2.5px solid var(--ink); border-radius: 14px; }
+  .lvup { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .lvup form { margin: 0; }
+  @media (max-width: 640px) { .detail { grid-template-columns: 1fr; } .detail > .card-wrap { max-width: 250px; } }
 </style>
 </head>
 <body>
 <header class="appbar">
   <div class="appbar-inner">
     <a class="brand" href="menu.php">STAR CARDS</a>
-<?php if ($user): ?>
-    <span class="gems" title="石"><i class="gem-icon"></i><?= number_format($gems) ?></span>
-    <span class="who"><strong><?= h($user['name']) ?></strong>（ID: <?= h($user['id']) ?>）</span>
+<?php if ($user && $status): ?>
+    <div class="status">
+      <span class="rank" title="次のランクまで <?= number_format($status['exp_next'] - $status['exp']) ?> EXP">
+        <small class="en">Rank</small><b><?= h($status['player_rank']) ?></b>
+        <i class="bar"><i style="width:<?= round($status['exp'] / $status['exp_next'] * 100) ?>%"></i></i>
+      </span>
+      <span class="stamina" data-stamina="<?= h($status['stamina']) ?>" data-max="<?= h($status['stamina_max']) ?>" data-next="<?= h($status['stamina_next']) ?>" data-regen="<?= STAMINA_REGEN_SEC ?>">
+        <small class="en">Stamina</small><b><span data-now><?= h($status['stamina']) ?></span>/<?= h($status['stamina_max']) ?></b>
+        <i class="bar"><i style="width:<?= min(100, round($status['stamina'] / $status['stamina_max'] * 100)) ?>%"></i></i>
+        <em data-timer></em>
+      </span>
+      <span class="coin" title="ゴールド"><i class="gold-icon"></i><?= number_format($status['gold']) ?></span>
+      <span class="gems" title="石"><i class="gem-icon"></i><?= number_format($status['gems']) ?></span>
+    </div>
+    <span class="who"><strong><?= h($user['name']) ?></strong></span>
     <a class="plain" href="select_user.php">切替</a>
     <form action="select_user.php" method="post"><button type="submit" name="logout">ログアウト</button></form>
 <?php else: ?>
@@ -821,10 +1139,25 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
   <nav class="gnav">
 <?php foreach ($nav as $file => [$label, $key]):
     $active = $script === $file || ($key === 'forge' && str_starts_with($script, 'forge_')); ?>
-    <a href="<?= h($file) ?>" class="<?= $active ? 'active' : '' ?>"><?= h($label) ?></a>
+    <a href="<?= h($file) ?>" class="<?= $active ? 'active' : '' ?>"><?= h($label) ?><?php if (!empty($badges[$file])): ?><span class="dot"><?= h($badges[$file]) ?></span><?php endif; ?></a>
 <?php endforeach; ?>
   </nav>
 </header>
+<script>
+// スタミナの回復をその場で表示する（実際の回復はサーバーで計算）
+(function () {
+  var el = document.querySelector('.appbar .stamina');
+  if (!el) return;
+  var now = +el.dataset.stamina, max = +el.dataset.max, next = +el.dataset.next, regen = +el.dataset.regen;
+  var num = el.querySelector('[data-now]'), timer = el.querySelector('[data-timer]'), bar = el.querySelector('.bar i');
+  function tick() {
+    if (now >= max) { timer.textContent = ''; return; }
+    if (--next <= 0) { now++; next = regen; num.textContent = now; bar.style.width = Math.min(100, now / max * 100) + '%'; }
+    timer.textContent = now >= max ? '' : Math.floor(next / 60) + ':' + String(next % 60).padStart(2, '0');
+  }
+  tick(); setInterval(tick, 1000);
+})();
+</script>
 <main>
 <?php if ($step > 0): ?>
 <ol class="steps">

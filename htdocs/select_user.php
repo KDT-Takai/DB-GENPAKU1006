@@ -36,7 +36,7 @@ $users = db()->query(
 )->fetchAll();
 
 $me = current_user();
-render_header('ユーザー選択', 0, '操作するユーザーを選んでください。');
+render_header('ユーザー選択', 0, '');
 
 if ($message !== '') {
     render_notice($message);

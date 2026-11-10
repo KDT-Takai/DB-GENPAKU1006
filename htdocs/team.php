@@ -53,22 +53,22 @@ if ($editSlot < 1 || $editSlot > TEAM_SLOTS) {
 $candidates = [];
 if ($editSlot) {
     $stmt = db()->prepare(
-        'SELECT uc.id AS user_card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp, t.slot AS team_slot
+        'SELECT ' . CARD_COLS . ', t.slot AS team_slot
            FROM user_cards uc
            JOIN cards c ON c.id = uc.card_id
            LEFT JOIN user_team_cards t ON t.user_card_id = uc.id
           WHERE uc.user_id = :user_id
-          ORDER BY c.rarity DESC, c.limit_break DESC, c.attack DESC, uc.id'
+          ORDER BY c.rarity DESC, c.limit_break DESC, uc.level DESC, uc.id'
     );
     $stmt->execute([':user_id' => $user['id']]);
     $candidates = $stmt->fetchAll();
 }
 
-render_header('チーム編成', 0, 'バトルに出す4枚を選びます。編成中のカードは限界突破の素材にできません。');
+render_header('チーム編成', 0, 'バトルに出す4枚。先頭がホームのリーダーになるよ。');
 render_flash();
 ?>
 <div class="panel">
-  <div class="power" style="margin-bottom:16px"><span class="en">Team Power</span><b><?= number_format(team_power($team)) ?></b>
+  <div class="power" style="margin-bottom:16px"><span class="label">チーム戦闘力</span><b><?= number_format(team_power($team)) ?></b>
     <span class="muted">（ATK + HP÷4 の合計）</span></div>
   <div class="slots">
 <?php for ($s = 1; $s <= TEAM_SLOTS; $s++): ?>

@@ -57,7 +57,7 @@ $next = [
     'hp'          => $target['next_hp'],
 ];
 
-render_header('素材を選ぶ', 2, '素材にするカードをクリックすると、すぐに強化が実行されます。素材にしたカードはなくなります。');
+render_header('素材を選ぶ', 2, '選んだ瞬間に突破！ 素材のカードはなくなるよ。');
 ?>
 <div class="panel">
   <div class="compare">

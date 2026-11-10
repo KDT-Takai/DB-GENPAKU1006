@@ -15,7 +15,7 @@ $rows = db()->query(
       ORDER BY wins DESC, win_rate DESC, u.id"
 )->fetchAll();
 
-render_header('ランキング', 0, '対戦の勝利数ランキングです。勝利数が同じ場合は勝率の高い順に並びます。');
+render_header('ランキング', 0, '勝ち数が多い順。同じなら勝率で。');
 ?>
 <section class="panel">
   <div class="table-wrap">

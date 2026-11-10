@@ -90,6 +90,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pdo->prepare('UPDATE users SET gems = gems - :cost, pity_count = :pity WHERE id = :id')
             ->execute([':cost' => $cost, ':pity' => $pity, ':id' => $user['id']]);
 
+        count_up($user['id'], 'gacha', $count);
         $pdo->commit();
         $_SESSION['gacha_result'] = $results;
     } catch (RuntimeException $e) {
@@ -105,7 +106,7 @@ if (!empty($_SESSION['gacha_result'])) {
     $ids = array_column($_SESSION['gacha_result'], 'user_card_id');
     $in  = implode(',', array_fill(0, count($ids), '?'));
     $stmt = db()->prepare(
-        "SELECT uc.id AS user_card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp
+        'SELECT ' . CARD_COLS . "
            FROM user_cards uc JOIN cards c ON c.id = uc.card_id
           WHERE uc.id IN ($in)"
     );
@@ -138,9 +139,30 @@ $untilPity = $gacha['pity'] - $me['pity_count'];
 render_header('ガチャ');
 render_flash();
 ?>
-<?php if ($results): ?>
+<?php if ($results): $best = max(array_column($results, 'rarity')); ?>
+<div class="warp" id="warp" style="--wc: <?= $best >= 5 ? '#ffc96a' : ($best >= 4 ? '#b07aff' : '#5aa8ff') ?>">
+  <div class="tunnel"></div>
+  <div class="orb"></div>
+  <button type="button" class="skip">スキップ</button>
+  <div class="hint">TAP TO SKIP</div>
+</div>
+<script>
+// ワープ演出：光の色で最高レア度が分かる（金＝★5、紫＝★4、青＝★3）。終わったら結果を1枚ずつめくる
+document.addEventListener('DOMContentLoaded', function () {
+  var warp = document.getElementById('warp');
+  var grid = document.querySelector('.gacha-result .grid');
+  if (grid) [].forEach.call(grid.children, function (c, i) { c.style.animationDelay = (i * 0.12) + 's'; c.style.animationPlayState = 'paused'; });
+  function end() {
+    if (warp.hidden) return;
+    warp.hidden = true;
+    if (grid) [].forEach.call(grid.children, function (c) { c.style.animationPlayState = 'running'; });
+  }
+  warp.addEventListener('click', end);
+  setTimeout(end, 2400);
+});
+</script>
 <section class="panel gacha-result">
-  <p class="celebrate"><span class="en">Warp Result</span><span class="ja"><?= count($results) ?>回 ワープの結果</span></p>
+  <p class="celebrate"><span class="ja"><?= count($results) ?>回 ワープの結果</span></p>
   <div class="grid">
 <?php foreach ($results as $c): ?>
     <?php render_card($c, ['badges' => $c['new'] ? [['NEW', 'new']] : []]); ?>
@@ -155,7 +177,6 @@ render_flash();
     <img src="resource/cards/<?= h($p['image']) ?>" alt="">
 <?php endforeach; ?>
   </div>
-  <span class="en">Event Warp</span>
   <h2><?= h($gacha['name']) ?></h2>
   <p><?= h($gacha['description']) ?></p>
   <div class="pickup">

@@ -8,8 +8,9 @@ $rarity = filter_input(INPUT_GET, 'rarity', FILTER_VALIDATE_INT) ?: 0;
 $sort   = $_GET['sort'] ?? 'rarity';
 $orders = [
     'rarity' => ['レア度順', 'c.rarity DESC, c.limit_break DESC, c.id, uc.id'],
-    'attack' => ['ATK順',    'c.attack DESC, uc.id'],
-    'hp'     => ['HP順',     'c.hp DESC, uc.id'],
+    'level'  => ['レベル順', 'uc.level DESC, c.rarity DESC, uc.id'],
+    'attack' => ['ATK順',    'attack DESC, uc.id'],
+    'hp'     => ['HP順',     'hp DESC, uc.id'],
     'new'    => ['入手順',   'uc.id DESC'],
 ];
 if (!isset($orders[$sort])) {
@@ -17,8 +18,7 @@ if (!isset($orders[$sort])) {
 }
 
 // ORDER BY はプレースホルダにできないので、許可したものだけを埋め込む
-$sql = 'SELECT uc.id AS user_card_id, c.name, c.image, c.rarity, c.limit_break, c.attack, c.hp,
-               (t.user_card_id IS NOT NULL) AS in_team
+$sql = 'SELECT ' . CARD_COLS . ', (t.user_card_id IS NOT NULL) AS in_team
           FROM user_cards uc
           JOIN cards c ON c.id = uc.card_id
           LEFT JOIN user_team_cards t ON t.user_card_id = uc.id
@@ -42,11 +42,11 @@ $book = $stmt->fetch();
 
 $url = fn(array $q) => 'cards.php?' . http_build_query(array_merge(['rarity' => $rarity, 'sort' => $sort], $q));
 
-render_header('所持カード', 0, '持っているカードの一覧です。同じカードが2枚以上あれば限界突破できます。');
+render_header('所持カード', 0, 'タップでレベル上げ。');
 ?>
 <div class="stat-row">
-  <div class="stat"><span class="en">Cards</span><b><?= count($cards) ?></b> 枚<?= $rarity ? '（★' . $rarity . '）' : '' ?></div>
-  <div class="stat"><span class="en">Collection</span><b><?= h($book['owned']) ?></b> / <?= h($book['total']) ?> 種類</div>
+  <div class="stat"><span class="label">所持カード</span><b><?= count($cards) ?></b> 枚<?= $rarity ? '（★' . $rarity . '）' : '' ?></div>
+  <div class="stat"><span class="label">図鑑</span><b><?= h($book['owned']) ?></b> / <?= h($book['total']) ?> 種類</div>
 </div>
 
 <div class="filters">
@@ -66,7 +66,7 @@ render_header('所持カード', 0, '持っているカードの一覧です。�
 <?php else: ?>
 <div class="grid">
 <?php foreach ($cards as $c):
-    render_card($c, ['badges' => $c['in_team'] ? [['編成中', 'team']] : []]);
+    render_card($c, ['href' => 'card.php?id=' . $c['user_card_id'], 'badges' => $c['in_team'] ? [['編成中', 'team']] : []]);
 endforeach; ?>
 </div>
 <?php endif; ?>

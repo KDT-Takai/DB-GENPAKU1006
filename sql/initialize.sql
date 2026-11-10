@@ -205,3 +205,6 @@ INSERT INTO battle_histories (user_id, opponent_user_id, result, user_power, opp
 
 -- クエスト（ステージ）のテーブルとマスタデータ
 SOURCE /root/sql/stages.sql;
+
+-- 育成・デイリー要素（ランク・スタミナ・カードレベル・属性・ミッション・プレゼント）
+SOURCE /root/sql/social.sql;

@@ -6,6 +6,10 @@ $user = require_login();
 
 const REWARD_WIN  = 60;
 const REWARD_LOSE = 20;
+const GOLD_WIN    = 600;
+const GOLD_LOSE   = 200;
+const EXP_WIN     = 20;
+const EXP_LOSE    = 8;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $opponentId = filter_input(INPUT_POST, 'opponent_id', FILTER_VALIDATE_INT);
@@ -30,13 +34,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
              VALUES (:user_id, :opp, :result, :mp, :op, :reward)'
         )->execute([':user_id' => $user['id'], ':opp' => $opponentId, ':result' => $result,
                     ':mp' => $myPower, ':op' => $oppPower, ':reward' => $reward]);
-        $pdo->prepare('UPDATE users SET gems = gems + :reward WHERE id = :id')
-            ->execute([':reward' => $reward, ':id' => $user['id']]);
+        $gold = $result === 'win' ? GOLD_WIN : GOLD_LOSE;
+        $pdo->prepare('UPDATE users SET gems = gems + :reward, gold = gold + :gold WHERE id = :id')
+            ->execute([':reward' => $reward, ':gold' => $gold, ':id' => $user['id']]);
+        $rankUp = gain_exp($user['id'], $result === 'win' ? EXP_WIN : EXP_LOSE);
+        count_up($user['id'], 'battle');
         $pdo->commit();
 
         $_SESSION['battle_result'] = [
             'opponent_id' => $opponentId, 'result' => $result,
             'my_power' => $myPower, 'opp_power' => $oppPower, 'reward' => $reward, 'battle' => $battle,
+            'gold' => $gold, 'rank_up' => $rankUp,
         ];
     }
     redirect('battle.php');
@@ -75,7 +83,7 @@ $stmt = db()->prepare(
 $stmt->execute([':id' => $user['id']]);
 $histories = $stmt->fetchAll();
 
-render_header('対戦', 0,'自分のチームで他のユーザーと対戦します。勝利で石 ' . REWARD_WIN . '、敗北でも石 ' . REWARD_LOSE . ' がもらえます。');
+render_header('対戦', 0, 'スタミナなしで何回でも。勝てば石 ' . REWARD_WIN . '、負けても石 ' . REWARD_LOSE . ' もらえる。');
 render_flash();
 ?>
 <?php if ($last): ?>
@@ -87,8 +95,14 @@ render_flash();
   </div>
 <?php render_battle($last['battle'], $user['name'], (string)$lastOpp); ?>
   <div class="battle-after">
-    <p class="result-word <?= h($last['result']) ?>"><?= $last['result'] === 'win' ? 'VICTORY' : 'DEFEAT' ?></p>
-    <p style="text-align:center; margin:0">報酬：<span class="gems"><i class="gem-icon"></i><?= h($last['reward']) ?></span></p>
+    <p class="result-word <?= h($last['result']) ?>"><?= $last['result'] === 'win' ? '勝利！' : 'まけ…' ?></p>
+    <p style="text-align:center; margin:0">報酬：<span class="gems"><i class="gem-icon"></i><?= h($last['reward']) ?></span>
+      <span class="coin"><i class="gold-icon"></i><?= number_format($last['gold'] ?? 0) ?></span>
+      <span class="badge">EXP +<?= $last['result'] === 'win' ? EXP_WIN : EXP_LOSE ?></span>
+<?php if (!empty($last['rank_up'])): ?>
+      <br><span class="badge badge-new" style="margin-top:8px">ランクアップ！ スタミナ全回復・プレゼントに石が届きました</span>
+<?php endif; ?>
+    </p>
     <form method="post" action="battle.php" class="actions" style="justify-content:center; margin-top:16px">
       <input type="hidden" name="opponent_id" value="<?= h($last['opponent_id']) ?>">
       <button type="submit" class="btn">もう一度対戦</button>
@@ -98,7 +112,7 @@ render_flash();
 <?php endif; ?>
 
 <div class="panel">
-  <div class="power"><span class="en">My Team Power</span><b><?= number_format(team_power($myTeam)) ?></b>
+  <div class="power"><span class="label">チーム戦闘力</span><b><?= number_format(team_power($myTeam)) ?></b>
     <span class="muted"><?= count($myTeam) ?> / <?= TEAM_SLOTS ?> 枚</span>
     <a class="mini" href="team.php" style="margin-left:auto">編成する</a></div>
 </div>

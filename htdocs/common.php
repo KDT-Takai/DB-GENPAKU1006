@@ -96,10 +96,13 @@ function user_gems(int $userId): int
 const LEVEL_RATE        = 0.06;   // カードのレベルが1上がるごとのステータス上昇率
 const STAMINA_REGEN_SEC = 60;     // スタミナが1回復するまでの秒数
 
-// 所持カードを表示・計算するときの列（ATK・HP はレベルを反映した値にする）
+// 所持カードを表示・計算するときの列（ATK・HP はレベルと装備を反映した値にする）
+// 装備の値は レベル1の値 ×（1 + 0.1 ×（装備レベル - 1））。equip_stat() と同じ計算
 const CARD_COLS = 'uc.id AS user_card_id, uc.card_id, uc.level, c.name, c.image, c.rarity, c.limit_break, c.element, c.skill,
-                   CAST(ROUND(c.attack * (1 + 0.06 * (uc.level - 1))) AS SIGNED) AS attack,
-                   CAST(ROUND(c.hp * (1 + 0.06 * (uc.level - 1))) AS SIGNED) AS hp';
+                   CAST(ROUND(c.attack * (1 + 0.06 * (uc.level - 1))) + (SELECT COALESCE(SUM(ROUND(e.attack * (1 + 0.1 * (ue.level - 1)))), 0)
+                      FROM user_equipments ue JOIN equipments e ON e.id = ue.equipment_id WHERE ue.user_card_id = uc.id) AS SIGNED) AS attack,
+                   CAST(ROUND(c.hp * (1 + 0.06 * (uc.level - 1))) + (SELECT COALESCE(SUM(ROUND(e.hp * (1 + 0.1 * (ue.level - 1)))), 0)
+                      FROM user_equipments ue JOIN equipments e ON e.id = ue.equipment_id WHERE ue.user_card_id = uc.id) AS SIGNED) AS hp';
 
 // 属性：[表示名, 色]。火→風→水→火 の三すくみ、光と闇はお互いに弱点
 const ELEMENTS = [
@@ -224,6 +227,7 @@ const DAILY_MISSIONS = [
     'quest'   => ['クエストを3回クリアする',     3, 'gold', 1500],
     'battle'  => ['対戦を1回する',             1, 'gems', 30],
     'levelup' => ['カードを強化する',           1, 'gold', 800],
+    'idle'    => ['放置報酬を受け取る',         1, 'gems', 30],
 ];
 const DAILY_ALL = ['デイリーミッションをすべて達成', 'gems', 100];
 // [タイトル, 何の値で判定するか, 目標, 報酬の種類, 報酬量]
@@ -324,6 +328,138 @@ function team_power(array $team): int
 }
 
 const TEAM_SLOTS = 4;
+
+// ---------- 放置（オート周回） ----------
+const IDLE_MAX_SEC     = 12 * 3600;  // 放置報酬が貯まる上限（12時間）
+const IDLE_QUICK_SEC   = 2 * 3600;   // 「時短」でもらえる時間（2時間分）
+const IDLE_QUICK_COST  = 50;         // 時短1回の石（1日1回目は無料）
+const IDLE_QUICK_DAILY = 4;          // 時短できる1日の回数
+const IDLE_BOSS_EVERY  = 5;          // このステージごとに強いボスが出る
+
+// 1時間あたりの放置報酬（ステージが進むほど増える）
+function idle_rate(int $stage): array
+{
+    return [
+        'gold' => 600 + $stage * 150,
+        'exp'  => 40 + $stage * 10,
+        'gems' => 6 + intdiv($stage, IDLE_BOSS_EVERY) * 2,
+    ];
+}
+
+// 秒数ぶんの報酬
+function idle_amount(int $stage, int $sec): array
+{
+    return array_map(fn($perHour) => intdiv($perHour * $sec, 3600), idle_rate($stage));
+}
+
+// 放置状態（無ければ作る）。elapsed は上限で止めた経過秒、pending は受け取れる報酬
+function idle_state(int $userId, bool $lock = false): array
+{
+    db()->prepare('INSERT IGNORE INTO user_idle (user_id) VALUES (:u)')->execute([':u' => $userId]);
+    $stmt = db()->prepare('SELECT stage, claimed_at, wins FROM user_idle WHERE user_id = :u' . ($lock ? ' FOR UPDATE' : ''));
+    $stmt->execute([':u' => $userId]);
+    $s = $stmt->fetch();
+    $s['stage']   = (int)$s['stage'];
+    $s['elapsed'] = max(0, min(IDLE_MAX_SEC, time() - strtotime($s['claimed_at'])));
+    $s['pending'] = idle_amount($s['stage'], $s['elapsed']);
+    $s['rate']    = idle_rate($s['stage']);
+    return $s;
+}
+
+// 報酬を付与する（呼び出し側でトランザクションを開始しておく）。戻り値: 上がったランク数
+function idle_give(int $userId, array $amount): int
+{
+    db()->prepare('UPDATE users SET gold = gold + :g, gems = gems + :s WHERE id = :id')
+        ->execute([':g' => $amount['gold'], ':s' => $amount['gems'], ':id' => $userId]);
+    return $amount['exp'] > 0 ? gain_exp($userId, $amount['exp']) : 0;
+}
+
+// 貯まった放置報酬を受け取る。2時間ごとに装備が1つ見つかる（端数の時間は確率で）
+// 戻り値: [報酬, 上がったランク数, 拾った装備の名前リスト]
+function idle_claim(int $userId): array
+{
+    $s = idle_state($userId, true);
+    db()->prepare('UPDATE user_idle SET claimed_at = NOW() WHERE user_id = :u')->execute([':u' => $userId]);
+    $drops = intdiv($s['elapsed'], EQUIP_DROP_SEC) + (random_int(0, EQUIP_DROP_SEC - 1) < $s['elapsed'] % EQUIP_DROP_SEC ? 1 : 0);
+    return [$s['pending'], idle_give($userId, $s['pending']), equip_drop($userId, $s['stage'], $drops)];
+}
+
+// ステージの敵（毎回同じ顔ぶれになるよう、ステージ番号から決める）
+function idle_enemies(int $stage): array
+{
+    $pool = [
+        ['スライム', 'slime.svg', 'water'], ['ゴブリン', 'goblin.svg', 'wind'], ['ナイト', 'knight.svg', 'light'],
+        ['見習い魔法使い', 'mage.svg', 'fire'], ['宇宙ネコ', 'cat.svg', 'dark'], ['流星の射手', 'archer.svg', 'wind'],
+        ['氷晶の魔導士', 'ice.svg', 'water'], ['鉄壁の守護者', 'guardian.svg', 'light'], ['ドラゴン', 'dragon.svg', 'fire'],
+        ['銀河の剣聖', 'swordsman.svg', 'dark'],
+    ];
+    mt_srand($stage * 7919);
+    $isBoss = $stage % IDLE_BOSS_EVERY === 0;
+    $count  = $isBoss ? 3 : min(4, 2 + intdiv($stage, 4));
+    $scale  = 1.13 ** ($stage - 1);
+    // ステージが進むほど強い種類が出てくる
+    $top    = min(count($pool) - 1, 3 + intdiv($stage, 3));
+    $units  = [];
+    for ($i = 0; $i < $count; $i++) {
+        [$name, $image, $element] = $pool[mt_rand(0, $top)];
+        $boss = $isBoss && $i === 1;
+        $atk  = (int)round(45 * $scale * mt_rand(90, 110) / 100 * ($boss ? 1.6 : 1));
+        $hp   = (int)round(260 * $scale * mt_rand(90, 110) / 100 * ($boss ? 5 : 1));
+        $units[] = ['name' => ($boss ? '首領 ' : '') . $name, 'image' => $image, 'attack' => $atk, 'hp' => $hp,
+                    'max_hp' => $hp, 'boss' => $boss, 'element' => $element];
+    }
+    mt_srand();
+    return $units;
+}
+
+// ---------- 装備 ----------
+const EQUIP_SLOTS    = ['weapon' => ['武器', '⚔️'], 'armor' => ['防具', '🛡️'], 'accessory' => ['アクセサリー', '💍']];
+const EQUIP_RARITY   = [1 => ['N', '#b8b2a6'], 2 => ['R', '#3d9bff'], 3 => ['SR', '#8b67ff'], 4 => ['SSR', '#ffc22e']];
+const EQUIP_DROP_SEC = 2 * 3600;   // 放置でこの秒数ごとに装備が1つ見つかる
+
+function equip_max_level(int $rarity): int        { return 5 + $rarity * 5; }
+function equip_up_cost(int $level, int $rarity): int { return 80 * $level * $rarity; }
+function equip_sell_price(int $level, int $rarity): int { return 100 * $rarity * $rarity + 40 * ($level - 1) * $rarity; }
+function equip_stat(int $base, int $level): int   { return (int)round($base * (1 + 0.1 * ($level - 1))); }
+
+// ステージが進むほど良い装備が出やすい。$minRarity 以上が確定
+function equip_roll_rarity(int $stage, int $minRarity = 1): int
+{
+    $ssr = min(150, 5 + $stage * 5);       // 千分率
+    $sr  = min(350, 60 + $stage * 12);
+    $r   = 350;
+    $n   = random_int(1, 1000);
+    $rarity = $n <= $ssr ? 4 : ($n <= $ssr + $sr ? 3 : ($n <= $ssr + $sr + $r ? 2 : 1));
+    return max($minRarity, $rarity);
+}
+
+// 装備を $count 個ランダムに手に入れる。戻り値: 手に入れた装備の [名前, レア度] のリスト
+function equip_drop(int $userId, int $stage, int $count, int $minRarity = 1): array
+{
+    $got = [];
+    for ($i = 0; $i < $count; $i++) {
+        $rarity = equip_roll_rarity($stage, $minRarity);
+        $stmt = db()->prepare('SELECT id, name, rarity FROM equipments WHERE rarity = :r ORDER BY RAND() LIMIT 1');
+        $stmt->execute([':r' => $rarity]);
+        $e = $stmt->fetch();
+        db()->prepare('INSERT INTO user_equipments (user_id, equipment_id) VALUES (:u, :e)')->execute([':u' => $userId, ':e' => $e['id']]);
+        $got[] = [$e['name'], (int)$e['rarity']];
+    }
+    return $got;
+}
+
+// 「[SR]月の首飾り、[N]布の服」のような文字列
+function equip_names(array $got): string
+{
+    return implode('、', array_map(fn($g) => '[' . EQUIP_RARITY[$g[1]][0] . ']' . $g[0], $got));
+}
+
+// ボスに勝ったときの報酬（強いボスは多め）
+function idle_boss_reward(int $stage): array
+{
+    $big = $stage % IDLE_BOSS_EVERY === 0;
+    return ['gold' => 500 + $stage * 200, 'exp' => 20 + $stage * 5, 'gems' => $big ? 100 : 20];
+}
 
 // ---------- ターン制バトル（クエスト・対戦で共通） ----------
 const BATTLE_MAX_TURNS = 10;
@@ -624,6 +760,7 @@ function render_card(array $c, array $opts = []): void
     };
 
     ob_start(); ?>
+  <i class="card-shine" aria-hidden="true"></i>
   <div class="card-band"><span class="stars"><?= stars((int)$c['rarity']) ?></span><?php if (isset($c['element'])): ?><?= element_chip($c['element']) ?><?php endif; ?><?php if (isset($c['level'])): ?><span class="lv">Lv.<b><?= h($c['level']) ?></b></span><?php elseif (isset($c['user_card_id'])): ?><span class="uid">#<?= h($c['user_card_id']) ?></span><?php endif; ?></div>
 <?php if (!empty($c['image'])): ?>
   <img class="card-art" src="resource/cards/<?= h($c['image']) ?>" alt="" loading="lazy">
@@ -675,9 +812,11 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
     // ナビゲーション（ファイル名の先頭が一致したら選択中）
     $nav = [
         'menu.php'           => ['ホーム', 'menu'],
+        'idle.php'           => ['放置', 'idle'],
         'gacha.php'          => ['ガチャ', 'gacha'],
         'cards.php'          => ['カード', 'cards'],
         'team.php'           => ['編成', 'team'],
+        'equip.php'          => ['装備', 'equip'],
         'forge_entrance.php' => ['限界突破', 'forge'],
         'quest.php'          => ['クエスト', 'quest'],
         'battle.php'         => ['対戦', 'battle'],
@@ -685,6 +824,8 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
         'mission.php'        => ['ミッション', 'mission'],
         'present.php'        => ['プレゼント', 'present'],
     ];
+    $navIcons = ['menu' => '🏠', 'idle' => '⏳', 'gacha' => '✨', 'cards' => '🃏', 'team' => '👥', 'equip' => '⚔️', 'forge' => '🔥',
+                 'quest' => '🗺️', 'battle' => '🥊', 'ranking' => '👑', 'mission' => '📋', 'present' => '🎁'];
     $script = basename($_SERVER['SCRIPT_NAME'] ?? '');
     ?>
 <!DOCTYPE html>
@@ -1108,6 +1249,129 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
   .lvup { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
   .lvup form { margin: 0; }
   @media (max-width: 640px) { .detail { grid-template-columns: 1fr; } .detail > .card-wrap { max-width: 250px; } }
+
+  /* =====================================================================
+     作り込みレイヤー：ステッカー風のまま、光・立体感・動きを足す
+     ===================================================================== */
+  :root { --shine: linear-gradient(105deg, transparent 35%, rgba(255,255,255,.75) 48%, transparent 62%); }
+  html { scroll-behavior: smooth; }
+  ::selection { background: var(--sun); color: var(--ink); }
+  :focus-visible { outline: 3px solid var(--sky); outline-offset: 3px; }
+
+  /* 背景：紙のドットの上に、ゆっくり漂う色付きの形 */
+  body { position: relative; overflow-x: hidden; }
+  body::before, body::after { content: ""; position: fixed; z-index: -1; pointer-events: none; border: 3px solid rgba(29,26,34,.12); }
+  body::before { width: 340px; height: 340px; top: 120px; left: -140px; border-radius: 42% 58% 61% 39% / 45% 39% 61% 55%; background: rgba(255,194,46,.18);
+                 animation: blobA 26s ease-in-out infinite alternate; }
+  body::after  { width: 280px; height: 280px; bottom: -80px; right: -90px; border-radius: 61% 39% 45% 55% / 52% 61% 39% 48%; background: rgba(61,155,255,.14);
+                 animation: blobB 31s ease-in-out infinite alternate; }
+  @keyframes blobA { to { transform: translate(60px, 80px) rotate(40deg) scale(1.1); } }
+  @keyframes blobB { to { transform: translate(-70px, -60px) rotate(-35deg) scale(1.15); } }
+
+  /* ヘッダー：下にギザギザの縁、ロゴに星 */
+  .appbar { box-shadow: 0 4px 0 rgba(29,26,34,.25); }
+  .appbar::after { content: ""; position: absolute; left: 0; right: 0; bottom: -9px; height: 9px; pointer-events: none;
+                   background: linear-gradient(-45deg, transparent 6px, var(--ink) 0) 0 0 / 12px 9px repeat-x,
+                               linear-gradient(45deg, transparent 6px, var(--ink) 0) 0 0 / 12px 9px repeat-x; }
+  .appbar .brand { position: relative; transition: transform .2s; }
+  .appbar .brand::after { content: "★"; position: absolute; top: -10px; right: -10px; font-size: 14px; color: var(--sun); -webkit-text-stroke: 1px var(--ink);
+                          animation: twinkle 2.4s ease-in-out infinite; }
+  .appbar .brand:hover { transform: rotate(2deg) scale(1.04); }
+  @keyframes twinkle { 0%,100% { transform: scale(1) rotate(0); opacity: 1; } 50% { transform: scale(.6) rotate(72deg); opacity: .6; } }
+  .status .rank, .status .stamina { border: 1.5px solid #3d3843; }
+  .appbar .gems, .appbar .coin { box-shadow: 2px 2px 0 rgba(0,0,0,.4); }
+  .gem-icon { background: linear-gradient(135deg, #bfe3ff 0 30%, var(--sky) 30% 70%, #1f6fd1 70%); }
+  .gold-icon { background: radial-gradient(circle at 35% 35%, #fff3c4 0 18%, var(--sun) 20%); }
+
+  /* ナビ：アイコン付きのタブ。選択中は紙のタブが少し浮く */
+  .gnav a { display: inline-flex; align-items: center; gap: 5px; transition: color .15s, transform .15s; }
+  .gnav .ni { font-size: 15px; filter: grayscale(.6); transition: transform .2s, filter .2s; }
+  .gnav a:hover .ni { transform: translateY(-2px) rotate(-8deg) scale(1.15); filter: none; }
+  .gnav a.active { box-shadow: inset 0 3px 0 var(--sun); }
+  .gnav a.active .ni { filter: none; animation: navBounce .5s; }
+  @keyframes navBounce { 40% { transform: translateY(-4px) scale(1.2); } }
+  .gnav .dot { animation: dotPulse 1.6s ease-in-out infinite; }
+  @keyframes dotPulse { 50% { transform: scale(1.18); } }
+
+  /* ページ見出し：マーカーの下線＋飾りの星 */
+  .page-head { display: flex; align-items: center; gap: 14px; margin: 6px 0 18px; }
+  .page-head h1 { margin: 0; animation: headIn .5s cubic-bezier(.2,1.4,.4,1) both; }
+  .page-head h1::after { transform-origin: left; animation: markIn .5s .15s cubic-bezier(.2,1,.3,1) both; }
+  .page-deco { display: inline-flex; gap: 6px; }
+  .page-deco i { width: 12px; height: 12px; border: 2.5px solid var(--ink); transform: rotate(45deg); background: var(--tomato); animation: decoIn .4s both; }
+  .page-deco i:nth-child(2) { background: var(--sun); animation-delay: .1s; } .page-deco i:nth-child(3) { background: var(--sky); animation-delay: .2s; }
+  @keyframes headIn { from { opacity: 0; transform: translateX(-14px) rotate(-3deg); } }
+  @keyframes markIn { from { transform: skewX(-12deg) scaleX(0); } }
+  @keyframes decoIn { from { opacity: 0; transform: rotate(45deg) scale(0); } }
+
+  /* パネル：上辺にうっすら光、見出しの前に色付きのひし形 */
+  .panel { background-image: linear-gradient(180deg, rgba(255,255,255,.7), rgba(255,255,255,0) 60px); }
+  .panel > h2, .panel > .actions > h2 { display: flex; align-items: center; gap: 8px; }
+  .panel > h2::before, .panel > .actions > h2::before { content: ""; flex: none; width: 10px; height: 10px; transform: rotate(45deg); background: var(--tomato); border: 2px solid var(--ink); }
+
+  /* ボタン：上側のツヤ、ホバーで光が横切る、押すと波紋 */
+  .btn, .tile { position: relative; overflow: hidden; isolation: isolate; }
+  .btn::before { content: ""; position: absolute; inset: 0 0 50% 0; z-index: -1; background: linear-gradient(rgba(255,255,255,.45), rgba(255,255,255,0)); border-radius: 10px 10px 0 0; }
+  .btn::after { content: ""; position: absolute; inset: 0; z-index: -1; background: var(--shine); transform: translateX(-120%); }
+  .btn:not([disabled]):hover::after { transform: translateX(120%); transition: transform .6s; }
+  .btn:not([disabled]):hover { transform: translate(-1px, -1px); box-shadow: 5px 5px 0 var(--ink); }
+  .btn:not([disabled]):active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 var(--ink); }
+  .ripple { position: absolute; z-index: -1; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: rgba(255,255,255,.7); pointer-events: none;
+            animation: ripple .6s ease-out forwards; }
+  @keyframes ripple { to { transform: scale(26); opacity: 0; } }
+  .mini { transition: transform .12s, background .12s; }
+  .mini:hover { transform: translateY(-1px); }
+
+  /* お知らせ：アイコン付きで弾むように出る */
+  .notice { display: flex; align-items: center; gap: 10px; animation: noticeIn .45s cubic-bezier(.2,1.5,.4,1) both; }
+  .notice::before { content: "💡"; flex: none; font-size: 18px; }
+  .notice-ok::before { content: "🎉"; } .notice-error::before { content: "⚠️"; }
+  @keyframes noticeIn { from { opacity: 0; transform: translateY(-10px) scale(.96); } }
+
+  /* メーター：中をゆっくり流れる */
+  .pity-bar i, .meter-bar i { background-size: 17px 17px; animation: barFlow 1s linear infinite; transition: width .4s; }
+  @keyframes barFlow { to { background-position: 17px 0; } }
+
+  /* 数字の統計：角にラベルの色帯 */
+  .stat { position: relative; overflow: hidden; transition: transform .15s; }
+  .stat::after { content: ""; position: absolute; right: -14px; top: -14px; width: 40px; height: 40px; transform: rotate(45deg); background: var(--sun); border: 2px solid var(--ink); }
+  .stat-row .stat:nth-child(2)::after { background: var(--sky); } .stat-row .stat:nth-child(3)::after { background: var(--mint); }
+  .stat-row .stat:nth-child(4)::after { background: var(--grape); } .stat-row .stat:nth-child(5)::after { background: var(--tomato); }
+  .stat:hover { transform: translateY(-2px); }
+
+  /* カード：マウスで傾く・★4はうっすら、★5はホログラムのように光る */
+  .card { transform-style: preserve-3d; will-change: transform; }
+  .card.tilting { transform: perspective(700px) rotateX(var(--tx, 0)) rotateY(var(--ty, 0)) translateY(-4px) !important; box-shadow: 6px 8px 0 var(--ink); transition: box-shadow .12s; }
+  .card-shine { position: absolute; inset: 0; z-index: 4; pointer-events: none; border-radius: inherit; opacity: 0; transition: opacity .2s;
+                background: radial-gradient(circle at var(--mx, 50%) var(--my, 30%), rgba(255,255,255,.55), transparent 45%); mix-blend-mode: soft-light; }
+  .card.tilting .card-shine { opacity: 1; }
+  .card.r4 .card-shine { opacity: .35; }
+  .card.r5 .card-shine { opacity: .8; mix-blend-mode: color-dodge;
+    background: radial-gradient(circle at var(--mx, 50%) var(--my, 30%), rgba(255,255,255,.6), transparent 40%),
+                linear-gradient(115deg, transparent 20%, rgba(255,120,200,.35) 35%, rgba(120,220,255,.35) 50%, rgba(255,240,120,.35) 65%, transparent 80%);
+    background-size: 100% 100%, 250% 250%; animation: holo 4s linear infinite; }
+  @keyframes holo { from { background-position: 0 0, 0% 0%; } to { background-position: 0 0, 250% 250%; } }
+  .card.r5 .card-band .stars { color: var(--sun); animation: starGlint 2.2s ease-in-out infinite; }
+  @keyframes starGlint { 50% { filter: brightness(1.5) drop-shadow(0 0 4px #fff3c4); } }
+  .card.lb2::after { content: "MAX"; position: absolute; z-index: 5; right: -26px; top: 12px; width: 96px; text-align: center; font-family: var(--display); font-size: 11px;
+                     background: var(--tomato); color: #fff; border-block: 2px solid var(--ink); transform: rotate(40deg); }
+
+  /* スクロールで現れる（JSが .reveal を付けたものだけ） */
+  .reveal { opacity: 0; transform: translateY(16px); transition: opacity .5s var(--d, 0ms), transform .5s cubic-bezier(.2,1.2,.4,1) var(--d, 0ms); }
+  .reveal.in { opacity: 1; transform: none; }
+
+  /* 表：行にホバー色 */
+  table.list tr:not(:first-child):hover td { background: rgba(255,194,46,.14); }
+
+  /* フッター */
+  .site-foot { display: flex; justify-content: center; align-items: center; gap: 12px; flex-wrap: wrap; padding: 22px 16px 34px; font-size: 12px; font-weight: 800; color: var(--muted);
+               border-top: 2.5px dashed rgba(29,26,34,.2); max-width: 1040px; margin: 0 auto; }
+  .brand-mini { font-family: var(--display); color: var(--ink); background: var(--sun); padding: 0 8px; border: 2px solid var(--ink); border-radius: 7px; transform: rotate(-2deg); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+    .reveal { opacity: 1; transform: none; }
+  }
 </style>
 </head>
 <body>
@@ -1139,7 +1403,7 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
   <nav class="gnav">
 <?php foreach ($nav as $file => [$label, $key]):
     $active = $script === $file || ($key === 'forge' && str_starts_with($script, 'forge_')); ?>
-    <a href="<?= h($file) ?>" class="<?= $active ? 'active' : '' ?>"><?= h($label) ?><?php if (!empty($badges[$file])): ?><span class="dot"><?= h($badges[$file]) ?></span><?php endif; ?></a>
+    <a href="<?= h($file) ?>" class="<?= $active ? 'active' : '' ?>"<?= $active ? ' aria-current="page"' : '' ?>><span class="ni" aria-hidden="true"><?= $navIcons[$key] ?></span><?= h($label) ?><?php if (!empty($badges[$file])): ?><span class="dot"><?= h($badges[$file]) ?></span><?php endif; ?></a>
 <?php endforeach; ?>
   </nav>
 </header>
@@ -1166,7 +1430,10 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
 <?php endforeach; ?>
 </ol>
 <?php endif; ?>
-<h1><?= h($title) ?></h1>
+<div class="page-head">
+  <h1><?= h($title) ?></h1>
+  <span class="page-deco" aria-hidden="true"><i></i><i></i><i></i></span>
+</div>
 <?php if ($lead !== ''): ?>
 <p class="lead"><?= h($lead) ?></p>
 <?php endif; ?>
@@ -1175,5 +1442,70 @@ function render_header(string $title, int $step = 0, string $lead = ''): void
 
 function render_footer(): void
 {
-    echo "</main>\n</body>\n</html>\n";
+    ?>
+</main>
+<footer class="site-foot"><span class="brand-mini">STAR CARDS</span><span>放置して、育てて、引いて、勝つ。</span></footer>
+<script>
+// 共通の演出（数字のカウントアップ・カードの傾き・ボタンの波紋・スクロールで現れる）。動きを減らす設定のときは何もしない
+(function () {
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) return;
+
+  // .stat b / .power b の数字を 0 から数え上げる
+  document.querySelectorAll('.stat b, .power b, .count-up').forEach(function (el) {
+    var text = el.textContent.trim();
+    if (!/^[\d,]+$/.test(text)) return;
+    var to = +text.replace(/,/g, ''), start = null, dur = Math.min(1100, 300 + to / 5);
+    if (to < 2) return;
+    el.textContent = '0';
+    function step(t) {
+      if (start === null) start = t;
+      var p = Math.min(1, (t - start) / dur), v = Math.round(to * (1 - Math.pow(1 - p, 3)));
+      el.textContent = v.toLocaleString('ja-JP');
+      if (p < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  });
+
+  // カードをマウスの位置に合わせて少し傾け、光沢を動かす
+  document.addEventListener('pointermove', function (e) {
+    var card = e.target.closest && e.target.closest('.card:not(.disabled)');
+    if (!card || e.pointerType !== 'mouse') return;
+    var r = card.getBoundingClientRect(), x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+    card.style.setProperty('--mx', (x * 100).toFixed(1) + '%');
+    card.style.setProperty('--my', (y * 100).toFixed(1) + '%');
+    card.style.setProperty('--tx', ((y - .5) * -8).toFixed(2) + 'deg');
+    card.style.setProperty('--ty', ((x - .5) * 10).toFixed(2) + 'deg');
+    card.classList.add('tilting');
+  });
+  document.addEventListener('pointerout', function (e) {
+    var card = e.target.closest && e.target.closest('.card');
+    if (card && !card.contains(e.relatedTarget)) card.classList.remove('tilting');
+  });
+
+  // ボタンを押した位置から波紋
+  document.addEventListener('pointerdown', function (e) {
+    var b = e.target.closest && e.target.closest('.btn:not([disabled]), .tile');
+    if (!b) return;
+    var r = b.getBoundingClientRect(), s = document.createElement('i');
+    s.className = 'ripple';
+    s.style.left = (e.clientX - r.left) + 'px';
+    s.style.top = (e.clientY - r.top) + 'px';
+    b.appendChild(s);
+    setTimeout(function () { s.remove(); }, 600);
+  });
+
+  // パネルやタイルを、画面に入ったときにふわっと出す
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function (list) {
+      list.forEach(function (en) { if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); } });
+    }, { rootMargin: '0px 0px -40px 0px' });
+    document.querySelectorAll('main > .panel, main > section, .home-tiles .tile, .stat-row .stat, .stage, .mission, .present')
+      .forEach(function (el, i) { el.classList.add('reveal'); el.style.setProperty('--d', Math.min(i, 8) * 45 + 'ms'); io.observe(el); });
+  }
+})();
+</script>
+</body>
+</html>
+<?php
 }

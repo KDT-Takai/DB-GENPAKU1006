@@ -8,10 +8,12 @@ $rows = db()->query(
     "SELECT u.id, u.name,
             COUNT(b.id)                    AS battles,
             COALESCE(SUM(b.result = 'win'), 0) AS wins,
-            COALESCE(SUM(b.result = 'win') / NULLIF(COUNT(b.id), 0) * 100, 0) AS win_rate
+            COALESCE(SUM(b.result = 'win') / NULLIF(COUNT(b.id), 0) * 100, 0) AS win_rate,
+            COALESCE(i.stage, 1)            AS idle_stage
        FROM users u
        LEFT JOIN battle_histories b ON b.user_id = u.id
-      GROUP BY u.id, u.name
+       LEFT JOIN user_idle i ON i.user_id = u.id
+      GROUP BY u.id, u.name, i.stage
       ORDER BY wins DESC, win_rate DESC, u.id"
 )->fetchAll();
 
@@ -20,7 +22,7 @@ render_header('ランキング', 0, '勝ち数が多い順。同じなら勝率�
 <section class="panel">
   <div class="table-wrap">
   <table class="list">
-    <tr><th>順位</th><th>ユーザー</th><th style="text-align:right">勝利数</th><th style="text-align:right">対戦数</th><th style="text-align:right">勝率</th><th style="text-align:right">チーム戦闘力</th></tr>
+    <tr><th>順位</th><th>ユーザー</th><th style="text-align:right">勝利数</th><th style="text-align:right">対戦数</th><th style="text-align:right">勝率</th><th style="text-align:right">放置ステージ</th><th style="text-align:right">チーム戦闘力</th></tr>
 <?php
 $rank = 0;
 $prev = null;
@@ -38,6 +40,7 @@ foreach ($rows as $i => $r):
       <td class="num"><?= h($r['wins']) ?></td>
       <td class="num"><?= h($r['battles']) ?></td>
       <td class="num"><?= number_format((float)$r['win_rate'], 1) ?>%</td>
+      <td class="num"><?= h($r['idle_stage']) ?></td>
       <td class="num"><?= number_format(team_power(team_cards((int)$r['id']))) ?></td>
     </tr>
 <?php endforeach; ?>

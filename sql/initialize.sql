@@ -208,3 +208,9 @@ SOURCE /root/sql/stages.sql;
 
 -- 育成・デイリー要素（ランク・スタミナ・カードレベル・属性・ミッション・プレゼント）
 SOURCE /root/sql/social.sql;
+
+-- 放置（オート周回・放置報酬・ステージボス）
+SOURCE /root/sql/idle.sql;
+
+-- 装備（武器・防具・アクセサリー）
+SOURCE /root/sql/equipment.sql;
